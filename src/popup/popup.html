@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>薪火任务助手</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="panel">
+      <header class="header">
+        <div>
+          <p class="eyebrow">XINHUO</p>
+          <h1>薪火评论任务</h1>
+        </div>
+        <span id="statusBadge" class="badge">Idle</span>
+      </header>
+
+      <section class="controls">
+        <label class="field">
+          <span>单次任务数</span>
+          <input id="maxTasksPerRun" type="number" min="1" max="9999" step="1">
+        </label>
+        <label class="field">
+          <span>动作间隔 ms</span>
+          <input id="actionDelayMs" type="number" min="500" max="10000" step="100">
+        </label>
+        <label class="field">
+          <span>X 回复模式</span>
+          <select id="replyMode">
+            <option value="fill">只填入</option>
+            <option value="post">自动发送</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>回复提供方</span>
+          <select id="replyProvider">
+            <option value="native">Sola 规则 + 真实输入</option>
+            <option value="sola_bridge">Sola Bridge</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>模型名称</span>
+          <input id="aiModel" type="text" autocomplete="off" placeholder="留空使用默认模型">
+        </label>
+        <label class="field">
+          <span>API Key</span>
+          <input id="aiApiKey" type="password" autocomplete="off">
+        </label>
+        <label class="check">
+          <input id="autoSubmitXinhuo" type="checkbox">
+          <span>回复后自动提交任务</span>
+        </label>
+        <label class="field full">
+          <span>回复提示词</span>
+          <textarea id="aiSystemPrompt" rows="5"></textarea>
+        </label>
+      </section>
+
+      <section class="actions">
+        <button id="saveBtn" type="button" class="secondary">保存配置</button>
+        <button id="debugBtn" type="button" class="secondary">打开调试台</button>
+        <button id="startBtn" type="button" class="primary">开始自动接单</button>
+        <button id="stopBtn" type="button" class="danger">停止</button>
+      </section>
+
+      <section class="summary">
+        <span>完成 <strong id="completedCount">0</strong></span>
+        <span>失败 <strong id="failedCount">0</strong></span>
+      </section>
+
+      <section>
+        <h2>运行日志</h2>
+        <ol id="logList" class="logs"></ol>
+      </section>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

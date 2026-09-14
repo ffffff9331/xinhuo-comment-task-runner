@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>薪火任务控制台</title>
+    <link rel="stylesheet" href="debug.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brandMark" aria-hidden="true"></span>
+          <div>
+            <p class="eyebrow">XINHUO RUNNER</p>
+            <h1>薪火评论任务控制台</h1>
+          </div>
+        </div>
+        <div class="state" aria-label="当前运行状态">
+          <span id="modeBadge" class="pill">空闲</span>
+          <span id="stageBadge" class="pill pillSubtle">等待开始</span>
+        </div>
+      </header>
+
+      <nav class="topNav" aria-label="控制台导航">
+        <button class="is-active" data-view="tasks" type="button">任务</button>
+        <button data-view="records" type="button">记录</button>
+        <button data-view="settings" type="button">设置</button>
+      </nav>
+
+      <section class="workspace">
+        <section class="view viewTasks is-active" data-view-panel="tasks">
+          <div class="taskMain">
+            <section class="steps panel" aria-labelledby="taskTitle">
+              <div class="sectionHead">
+                <div>
+                  <p class="sectionKicker">COMMAND QUEUE</p>
+                  <h2 id="taskTitle">任务流程</h2>
+                </div>
+                <div class="stateHints">
+                  <span id="runWindowHint" class="miniHint">运行时段 --</span>
+                </div>
+              </div>
+              <div class="autoCard">
+                <button id="startAutoBtn" class="primaryButton" type="button">全量检测</button>
+                <p>仅接取当前等级可做的评论、评论+点赞任务。</p>
+              </div>
+              <p id="commandStatus" class="commandStatus" aria-live="polite" hidden></p>
+
+              <div class="stepList quickActions" aria-label="从选中步骤连续执行薪火后续流程">
+                <button data-command="DEBUG_XINHUO_OPEN_TASKS" type="button" title="检测或打开薪火任务广场">
+                  <span class="stepIndex">01</span>
+                  <span class="stepCopy"><strong>检测</strong><small>薪火</small></span>
+                </button>
+                <button data-command="DEBUG_XINHUO_OPEN_FIRST_TASK" type="button" title="打开首个当前等级可接任务详情">
+                  <span class="stepIndex">02</span>
+                  <span class="stepCopy"><strong>任务</strong><small>打开</small></span>
+                </button>
+                <button data-command="DEBUG_XINHUO_CLAIM_OPEN_X" type="button" title="在当前薪火详情接单、确认风险并打开目标 X">
+                  <span class="stepIndex">03</span>
+                  <span class="stepCopy"><strong>接单</strong><small>开 X</small></span>
+                </button>
+                <button data-command="DEBUG_XINHUO_RUN_X_REPLY" type="button" title="执行当前薪火任务的 X 回复动作">
+                  <span class="stepIndex">04</span>
+                  <span class="stepCopy"><strong>回复</strong><small>X</small></span>
+                </button>
+                <button data-command="DEBUG_XINHUO_COMPLETE_X_TASK" type="button" title="保持 X 前台停留并提交薪火任务组件">
+                  <span class="stepIndex">05</span>
+                  <span class="stepCopy"><strong>提交 X</strong><small>验证领奖</small></span>
+                </button>
+                <button data-command="DEBUG_XINHUO_WAIT_COMPLETION" type="button" title="等待薪火官方终态并返回任务广场">
+                  <span class="stepIndex">06</span>
+                  <span class="stepCopy"><strong>确认完成</strong><small>回广场</small></span>
+                </button>
+                <button data-command="DEBUG_XINHUO_RETURN_TASKS" type="button" title="完成页未自动返回时，手动回到薪火任务广场">
+                  <span class="stepIndex">07</span>
+                  <span class="stepCopy"><strong>广场</strong><small>返回</small></span>
+                </button>
+              </div>
+              <button id="stopBtn" class="stopButton" type="button">停止当前运行</button>
+            </section>
+
+            <section class="inspect panel logPanel" aria-labelledby="logTitle">
+              <div class="sectionHead compact">
+                <div>
+                  <p class="sectionKicker">RUNTIME</p>
+                  <h2 id="logTitle">运行日志</h2>
+                </div>
+              </div>
+              <ol id="logList" class="logs" aria-live="polite"></ol>
+            </section>
+          </div>
+        </section>
+
+        <section class="view viewRecords" data-view-panel="records" hidden>
+          <section class="records panel" aria-labelledby="recordsTitle">
+            <div class="recordToolbar">
+              <div>
+                <p class="sectionKicker">HISTORY</p>
+                <h2 id="recordsTitle">回复记录</h2>
+                <p id="replyRecordCount">0 条</p>
+              </div>
+              <button id="clearReplyRecordsBtn" class="secondaryButton" type="button">清空记录</button>
+            </div>
+            <div id="replyRecordList"></div>
+          </section>
+        </section>
+
+        <section class="view viewSettings" data-view-panel="settings" hidden>
+          <section class="settings panel" aria-labelledby="settingsTitle">
+            <div class="sectionHead">
+              <div>
+                <p class="sectionKicker">PREFERENCES</p>
+                <h2 id="settingsTitle">薪火运行设置</h2>
+              </div>
+              <button id="saveBtn" class="secondaryButton" type="button">保存配置</button>
+            </div>
+
+            <details class="settingsGroup" open>
+              <summary class="settingsGroupHead">
+                <span>接单规则</span>
+                <span class="settingsGroupArrow" aria-hidden="true"></span>
+              </summary>
+              <div class="settingsGroupBody">
+                <div class="formGrid">
+                  <label class="check">
+                    <span>启用运行时段</span>
+                    <input id="runWindowEnabled" type="checkbox">
+                  </label>
+                  <label>
+                    <span>开始时间</span>
+                    <input id="runWindowStart" type="time" step="60">
+                  </label>
+                  <label>
+                    <span>结束时间</span>
+                    <input id="runWindowEnd" type="time" step="60">
+                  </label>
+                  <label>
+                    <span>最低赏金 KX</span>
+                    <input id="xinhuoMinTaskBounty" type="number" min="0" max="9999" step="0.001">
+                  </label>
+                  <label>
+                    <span>接取确认等待 ms</span>
+                    <input id="claimTimeoutMs" type="number" min="5000" max="300000" step="1000">
+                  </label>
+                  <label>
+                    <span>任务轮询 ms</span>
+                    <input id="cooldownPollMs" type="number" min="200" max="5000" step="100">
+                  </label>
+                  <label>
+                    <span>任务上限</span>
+                    <input id="maxTasksPerRun" type="number" min="1" max="9999" step="1">
+                  </label>
+                  <label>
+                    <span>接单尝试上限</span>
+                    <input id="maxTaskAttempts" type="number" min="1" max="9999" step="1">
+                  </label>
+                </div>
+              </div>
+            </details>
+
+            <details class="settingsGroup" open>
+              <summary class="settingsGroupHead">
+                <span>X 与核验</span>
+                <span class="settingsGroupArrow" aria-hidden="true"></span>
+              </summary>
+              <div class="settingsGroupBody">
+                <div class="formGrid">
+                  <label>
+                    <span>X 回复模式</span>
+                    <select id="replyMode">
+                      <option value="post">自动发送</option>
+                      <option value="fill">只填入</option>
+                    </select>
+                  </label>
+                  <label class="check">
+                    <span>回复后自动提交任务</span>
+                    <input id="autoSubmitXinhuo" type="checkbox">
+                  </label>
+                  <label>
+                    <span>动作间隔 ms</span>
+                    <input id="actionDelayMs" type="number" min="500" max="10000" step="100">
+                  </label>
+                </div>
+              </div>
+            </details>
+
+            <details class="settingsGroup">
+              <summary class="settingsGroupHead">
+                <span>AI 回复</span>
+                <span class="settingsGroupArrow" aria-hidden="true"></span>
+              </summary>
+              <div class="settingsGroupBody">
+                <div class="formGrid">
+                  <label>
+                    <span>模型名称</span>
+                    <input id="aiModel" type="text" autocomplete="off" placeholder="留空使用默认模型">
+                  </label>
+                  <label>
+                    <span>API 地址</span>
+                    <input id="aiApiUrl" type="url" placeholder="可留空使用默认地址">
+                  </label>
+                  <label class="fullWidth">
+                    <span>API Key</span>
+                    <input id="aiApiKey" type="password" autocomplete="off">
+                  </label>
+                  <label class="fullWidth">
+                    <span>回复提示词</span>
+                    <textarea id="aiSystemPrompt" rows="5" spellcheck="false"></textarea>
+                  </label>
+                </div>
+              </div>
+            </details>
+          </section>
+        </section>
+      </section>
+    </main>
+    <script src="debug.js"></script>
+  </body>
+</html>
