@@ -266,6 +266,21 @@ await test("AI timeout records two diagnostics and stops after one controlled re
   assert.ok(result.diagnostics.every((item) => item.reason === "timeout"));
   assert.ok(result.diagnostics.every((item) => /AI请求超时/.test(item.reasonText)));
 });
+await test("prompt-declared reply length overrides the default cap while task minimum still applies", () => {
+  const c = contextFor(engine, ["normalizeReplyMinChineseChars", "getPromptReplyLengthRange", "getReplyLengthRange", "isUsableReplyText", "validateFinalReplyText", "normalizeBlacklistCandidateText", "countReplyChineseChars"], {
+    MIN_REPLY_CHINESE_CHARS: 5,
+    MAX_REPLY_CHINESE_CHARS: 15,
+    checkBlacklistedWords: () => ({ hasBlacklisted: false, words: [] }),
+    detectReplyTextDegeneration: () => ({ blocked: false, reasonCode: "" })
+  });
+  const prompt = "回复10到20个汉字为主";
+  const range = c.getReplyLengthRange(prompt, { minChineseChars: 12 });
+  assert.equal(range.min, 12);
+  assert.equal(range.max, 20);
+  assert.equal(c.validateFinalReplyText("一二三四五六七八九十一二三四五六七八", prompt, { minChineseChars: 10 }).ok, true);
+  assert.equal(c.validateFinalReplyText("一二三四五六七八九十一", prompt, { minChineseChars: 12 }).reason, "length");
+  assert.equal(c.validateFinalReplyText("一二三四五六七八九十一二三四五六七八九十一", prompt, { minChineseChars: 10 }).reason, "length");
+});
 await test("reply history diagnostics retain distinct AI and X failure categories", () => {
   const c = contextFor(background, ["buildReplyFailureRecord"], {
     runtimeState: { currentTask: {} },

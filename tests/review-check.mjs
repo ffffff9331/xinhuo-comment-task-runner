@@ -83,17 +83,18 @@ const BLACKLIST_GLOBALS = {
 const ENGINE_FUNCS = [
   "pickUserFallbackReply", "refillFallbackReplyBag", "takeNextValidFallbackReply",
   "normalizeReplyMinChineseChars",
+  "getPromptReplyLengthRange", "getReplyLengthRange",
   "validateFinalReplyText", "isUsableReplyText", "normalizeBlacklistCandidateText",
   "countReplyChineseChars", "detectReplyTextDegeneration", "checkBlacklistedWords",
   "getReplyBlacklistSnapshot", "escapeRegExp"
 ];
 
-// Happy path: the long fallback bag (min >= 10 chars) honours the task length
-// constraint, and min-char requests are clamped into the 5..15 window.
-await test("long fallback bag replies satisfy the 10..15 chinese-char window and clamping holds", async () => {
+// Happy path: the long fallback bag honours the default task range, while a
+// user-declared upper bound may safely extend beyond the legacy 15-character cap.
+await test("long fallback bag honours the default range and configured limits may reach 60", async () => {
   const c = contextFor(engine, ENGINE_FUNCS, BLACKLIST_GLOBALS);
   assert.equal(c.normalizeReplyMinChineseChars(0), 5);
-  assert.equal(c.normalizeReplyMinChineseChars(99), 15);
+  assert.equal(c.normalizeReplyMinChineseChars(99), 60);
   assert.equal(c.normalizeReplyMinChineseChars(10), 10);
   const seen = new Set();
   for (let index = 0; index < 6; index += 1) {

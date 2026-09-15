@@ -565,13 +565,30 @@ function detectReplyTextDegeneration(value) {
 function normalizeReplyMinChineseChars(value) {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed)
-    ? Math.min(Math.max(parsed, MIN_REPLY_CHINESE_CHARS), MAX_REPLY_CHINESE_CHARS)
+    ? Math.min(Math.max(parsed, MIN_REPLY_CHINESE_CHARS), 60)
     : MIN_REPLY_CHINESE_CHARS;
 }
 
-function isUsableReplyText(text, options = {}) {
+function getPromptReplyLengthRange(systemPrompt) {
+  const match = String(systemPrompt || "").match(/(\d{1,2})\s*(?:到|至|[-~－—])\s*(\d{1,2})\s*个?\s*(?:汉字|中文字)/i);
+  if (!match) return null;
+  const min = Math.min(Math.max(Number(match[1]), 1), 60);
+  const max = Math.min(Math.max(Number(match[2]), min), 60);
+  return { min, max };
+}
+
+function getReplyLengthRange(systemPrompt, options = {}) {
+  const promptRange = getPromptReplyLengthRange(systemPrompt);
+  const taskMin = normalizeReplyMinChineseChars(options.minChineseChars);
+  const min = Math.max(taskMin, promptRange?.min || 0);
+  const max = Math.max(min, promptRange?.max || MAX_REPLY_CHINESE_CHARS);
+  return { min, max };
+}
+
+function isUsableReplyText(text, systemPrompt, options = {}) {
   const chineseChars = countReplyChineseChars(text);
-  return chineseChars >= normalizeReplyMinChineseChars(options.minChineseChars) && chineseChars <= MAX_REPLY_CHINESE_CHARS;
+  const range = getReplyLengthRange(systemPrompt, options);
+  return chineseChars >= range.min && chineseChars <= range.max;
 }
 
 function validateFinalReplyText(text, systemPrompt, options = {}) {
@@ -579,8 +596,9 @@ function validateFinalReplyText(text, systemPrompt, options = {}) {
   if (!normalized) {
     return { ok: false, reason: "empty", blacklistWords: [] };
   }
-  if (!isUsableReplyText(normalized, options)) {
-    return { ok: false, reason: "length", blacklistWords: [], minChineseChars: normalizeReplyMinChineseChars(options.minChineseChars) };
+  const range = getReplyLengthRange(systemPrompt, options);
+  if (!isUsableReplyText(normalized, systemPrompt, options)) {
+    return { ok: false, reason: "length", blacklistWords: [], minChineseChars: range.min, maxChineseChars: range.max };
   }
   const blacklistCheck = checkBlacklistedWords(normalized, systemPrompt);
   if (blacklistCheck.hasBlacklisted) {
@@ -604,17 +622,21 @@ function createReplyDiagnostic(stage, rawReply, normalizedReply, validation = {}
     normalized: clipReplyDiagnosticText(normalized, 90),
     charCount: countReplyChineseChars(normalized),
     reason,
-    reasonText: describeReplyFailureReason(reason, normalized, blacklistWords, validation.error, validation.minChineseChars),
+    reasonText: describeReplyFailureReason(reason, normalized, blacklistWords, validation.error, validation.minChineseChars, validation.maxChineseChars),
     blacklistWords
   };
 }
 
-function describeReplyFailureReason(reason, normalizedReply, blacklistWords, error, minChineseChars = MIN_REPLY_CHINESE_CHARS) {
+function describeReplyFailureReason(reason, normalizedReply, blacklistWords, error, minChineseChars, maxChineseChars) {
   if (reason === "ok") return "通过";
   if (reason === "timeout") return `AI请求超时：${clipReplyDiagnosticText(error, 120) || "中转站在等待期限内未返回"}`;
   if (reason === "api_error") return `AI接口异常：${clipReplyDiagnosticText(error, 120) || "未知错误"}`;
   if (reason === "empty") return "AI没有返回可用文本";
-  if (reason === "length") return `中文部分长度不合规：${countReplyChineseChars(normalizedReply)}个汉字，要求${normalizeReplyMinChineseChars(minChineseChars)}到${MAX_REPLY_CHINESE_CHARS}个汉字`;
+  if (reason === "length") {
+    const min = Number.isFinite(Number(minChineseChars)) ? Number(minChineseChars) : MIN_REPLY_CHINESE_CHARS;
+    const max = Number.isFinite(Number(maxChineseChars)) ? Number(maxChineseChars) : MAX_REPLY_CHINESE_CHARS;
+    return `中文部分长度不合规：${countReplyChineseChars(normalizedReply)}个汉字，要求${min}到${max}个汉字`;
+  }
   if (reason === "blacklist") {
     const words = Array.isArray(blacklistWords) && blacklistWords.length ? blacklistWords.join("、") : "未知黑名单词";
     return `命中黑名单：${words}`;
@@ -652,11 +674,12 @@ function getValidationRetryWords(validation) {
   return [reasonMap[validation.reason] || validation.reason || "回复不符合规则"];
 }
 
-function truncateReplyText(text) {
+function truncateReplyText(text, systemPrompt, options = {}) {
   if (!text) return "";
   const chars = Array.from(String(text).replace(/\s+/g, ""));
-  if (chars.length <= MAX_REPLY_CHINESE_CHARS) return chars.join("");
-  return chars.slice(0, MAX_REPLY_CHINESE_CHARS).join("");
+  const { max } = getReplyLengthRange(systemPrompt, options);
+  if (chars.length <= max) return chars.join("");
+  return chars.slice(0, max).join("");
 }
 
 function extractBlacklistCandidates(replyText) {
@@ -744,9 +767,12 @@ function appendReplyHardBanInstruction(systemPrompt) {
 }
 
 function appendTaskReplyLengthInstruction(systemPrompt, options = {}) {
-  const minChineseChars = normalizeReplyMinChineseChars(options.minChineseChars);
-  if (minChineseChars <= MIN_REPLY_CHINESE_CHARS) return systemPrompt;
-  const rule = `任务硬性要求：中文回复必须不少于${minChineseChars}个汉字，且不超过${MAX_REPLY_CHINESE_CHARS}个汉字。`;
+  const taskMin = normalizeReplyMinChineseChars(options.minChineseChars);
+  const currentRange = getReplyLengthRange(systemPrompt, options);
+  if (taskMin <= currentRange.min) return systemPrompt;
+  const min = Math.max(taskMin, currentRange.min);
+  const max = Math.max(min, currentRange.max);
+  const rule = `任务硬性要求：中文回复必须不少于${min}个汉字，且不超过${max}个汉字。`;
   return String(systemPrompt || "").includes(rule) ? String(systemPrompt || "") : `${String(systemPrompt || "").trim()}\n\n${rule}`.trim();
 }
 
