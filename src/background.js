@@ -14,7 +14,9 @@ const RUN_STATE_KEY = "xinhuoAutoRunStateV1";
 const XINHUO_KEEPALIVE_ALARM = "xinhuoAutoRunKeepaliveV1";
 const XINHUO_MARKETPLACE_IDLE_REFRESH_MS = 5 * 60 * 1000;
 const REPLY_HISTORY_KEY = "xinhuoReplyHistoryRecords";
+const REPLY_DIAGNOSTIC_HISTORY_KEY = "xinhuoReplyDiagnosticHistoryRecords";
 const MAX_REPLY_HISTORY_RECORDS = 200;
+const XINHUO_AI_TIMEOUT_MS = 120000;
 const ATTEMPT_DEDUPE_MS = 3 * 60 * 1000;
 const XINHUO_DEFAULT_AI_SYSTEM_PROMPT = "根据原推文写一句自然的中文回复。像真实用户刷到后随手留下的感受，简短、有一点具体反应，不必完整表达观点。10到15个汉字为主，可保留必要的英文词。避免宣传腔、总结腔、夸张吹捧、复述原文和模板化感叹。只输出回复。";
 
@@ -93,7 +95,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     .then(sendResponse)
     .catch((error) => {
       log("error", error.message || String(error));
-      sendResponse({ ok: false, error: error.message || String(error), state: runtimeState });
+      sendResponse({ ok: false, error: error.message || String(error), failureType: error.failureType || "", state: runtimeState });
     });
   return true;
 });
@@ -135,10 +137,10 @@ async function handleMessage(message, sender) {
       if (!message.runId || message.runId !== runtimeState.runId || !runtimeState.running) return { ok: false, error: "旧任务已停止，取消生成" };
       return generateReply(message.tweet, message.task, message.runId);
     case "GET_REPLY_RECORDS":
-      return { ok: true, records: await getReplyHistoryRecords() };
+      return { ok: true, records: await getCombinedReplyRecords() };
     case "CLEAR_REPLY_RECORDS":
-      await chrome.storage.local.set({ [REPLY_HISTORY_KEY]: [] });
-      log("info", "已清空薪火回复记录");
+      await chrome.storage.local.set({ [REPLY_HISTORY_KEY]: [], [REPLY_DIAGNOSTIC_HISTORY_KEY]: [] });
+      log("info", "已清空薪火回复与诊断记录");
       return { ok: true, records: [] };
     case "QUERY_TWEET_REPLY_HISTORY":
       return queryTweetReplyHistory(message.tweet, message.task);
@@ -285,6 +287,7 @@ async function debugOpenFirstXinhuoTask() {
     type: "DEBUG_XINHUO_OPEN_FIRST_TASK",
     runId: runtimeState.runId,
     settings: toContentSettings(settings),
+    attemptedTaskRecords: getAttemptedTaskRecords(),
     attemptedTaskKeys: getAttemptedTaskKeys()
   });
   if (!result?.ok || !result.task) return failDebugStep(result, "打开首个薪火可接任务失败");
@@ -532,6 +535,7 @@ async function runNextXinhuoTask(reason, options = {}) {
       type: "XINHUO_SELECT_AND_CLAIM",
       runId,
       settings: toContentSettings(settings),
+      attemptedTaskRecords: getAttemptedTaskRecords(),
       attemptedTaskKeys: getAttemptedTaskKeys()
     });
   }
@@ -577,7 +581,13 @@ async function runNextXinhuoTask(reason, options = {}) {
   await delay(Math.max(XINHUO_X_HYDRATION_MS, settings.actionDelayMs * 2));
   const reply = await sendToTab(xTab.id, { type: "RUN_X_REPLY", runId, task: result.task, settings: toContentSettings(settings) });
   if (!isActiveRun(runId)) return { ok: false, state: runtimeState };
-  if (!reply?.ok) return stopWithFailure(reply?.message || "X 回复失败，已保留当前页面", "reply_failed");
+  if (!reply?.ok) {
+    const message = reply?.message || "X 回复失败，已保留当前页面";
+    if (!isAIReplyFailureType(reply?.failureType)) {
+      await recordReplyDiagnosticHistory(buildReplyFailureRecord("x_send_failed", message, result.task));
+    }
+    return stopWithFailure(message, "reply_failed");
+  }
   runtimeState.lastXResult = reply;
   await recordReplyHistory(reply);
 
@@ -822,16 +832,25 @@ async function generateReply(tweet, task, runId = runtimeState.runId) {
   }, {
     ...(tweet || {}),
     url: tweet?.url || task?.tweetUrl || ""
-  }, { minChineseChars: Number(task?.minReplyChineseChars) || 10, signal: controller.signal, timeout: 60000 });
+  }, { minChineseChars: Number(task?.minReplyChineseChars) || 10, signal: controller.signal, timeout: XINHUO_AI_TIMEOUT_MS });
   if (controller.signal.aborted || runId !== runtimeState.runId || !runtimeState.running) throw new Error("任务已停止，丢弃 AI 结果");
-  if (result.fallback) {
-    logReplyDiagnostics(result.diagnostics);
-    log("warn", `AI 不可用，使用薪火兜底回复：${result.replyText}`);
-  } else {
-    if ((result.diagnostics || []).length) logReplyDiagnostics(result.diagnostics);
-    log("info", `已生成薪火回复：${result.replyText}`);
-  }
+  await recordAIReplyDiagnostics(result, tweet, task);
+  if ((result.diagnostics || []).length) logReplyDiagnostics(result.diagnostics);
+  log("info", `已生成薪火回复：${result.replyText}`);
   return { ok: true, ...result };
+  } catch (error) {
+    const message = error?.message || String(error);
+    if (!controller.signal.aborted && !/任务已停止|丢弃 AI 结果/.test(message)) {
+      const diagnostics = Array.isArray(error?.diagnostics) ? error.diagnostics : [];
+      await recordReplyDiagnosticHistory(buildReplyFailureRecord(
+        isAIReplyFailureType(error?.failureType) ? error.failureType : getAIReplyFailureType(diagnostics),
+        message,
+        task,
+        tweet,
+        diagnostics
+      ));
+    }
+    throw error;
   } finally {
     activeAIRequests.delete(controller);
   }
@@ -1228,10 +1247,14 @@ function isActiveRun(runId) {
   return Boolean(runtimeState.running && runtimeState.mode === "auto" && runtimeState.runId === runId);
 }
 
-function getAttemptedTaskKeys() {
+function getAttemptedTaskRecords() {
   const now = Date.now();
   runtimeState.attemptedTasks = (runtimeState.attemptedTasks || []).filter((item) => item.expiresAt > now);
-  return runtimeState.attemptedTasks.map((item) => item.key);
+  return runtimeState.attemptedTasks.map((item) => ({ key: item.key, expiresAt: item.expiresAt }));
+}
+
+function getAttemptedTaskKeys() {
+  return getAttemptedTaskRecords().map((item) => item.key);
 }
 
 function releaseXinhuoAttemptedTask(task) {
@@ -1246,14 +1269,24 @@ function markAttemptedTask(task) {
   if (!keys.length) return;
   const existing = new Set((runtimeState.attemptedTasks || []).map((item) => item.key));
   const fresh = keys.filter((key) => !existing.has(key));
-  const expiresAt = Date.now() + ATTEMPT_DEDUPE_MS;
+  const retryAt = Number(task?.retryAt) || 0;
+  const expiresAt = retryAt > Date.now() ? retryAt : Date.now() + ATTEMPT_DEDUPE_MS;
   runtimeState.attemptedTasks = [
     ...(runtimeState.attemptedTasks || []).filter((item) => item.expiresAt > Date.now() && !keys.includes(item.key)),
     ...keys.map((key) => ({ key, expiresAt }))
   ].slice(-100);
-  // Without this line a deduped task silently disappears from selection and
-  // the log only shows an unexplained "暂无可立即接取".
-  if (fresh.length) log("info", `已登记去重 ${Math.round(ATTEMPT_DEDUPE_MS / 60000)} 分钟：${describeXinhuoTaskForLog(task)}`);
+  if (fresh.length) {
+    const waitMs = Math.max(0, expiresAt - Date.now());
+    const strategy = retryAt > Date.now()
+      ? `${formatXinhuoRetryDelay(waitMs)} 后重新检测（下次放号前 1 分钟）`
+      : `已登记去重 ${Math.round(ATTEMPT_DEDUPE_MS / 60000)} 分钟`;
+    log("info", `${strategy}：${describeXinhuoTaskForLog(task)}`);
+  }
+}
+
+function formatXinhuoRetryDelay(ms) {
+  const seconds = Math.max(0, Math.ceil(Number(ms) / 1000));
+  return seconds >= 60 ? `${Math.floor(seconds / 60)}分${seconds % 60}秒` : `${seconds}秒`;
 }
 
 function describeXinhuoTaskForLog(task = {}) {
@@ -1277,6 +1310,21 @@ async function getReplyHistoryRecords() {
   return (Array.isArray(stored[REPLY_HISTORY_KEY]) ? stored[REPLY_HISTORY_KEY] : [])
     .map(normalizeXinhuoReplyRecord)
     .filter(Boolean)
+    .slice(0, MAX_REPLY_HISTORY_RECORDS);
+}
+
+async function getReplyDiagnosticRecords() {
+  const stored = await chrome.storage.local.get([REPLY_DIAGNOSTIC_HISTORY_KEY]);
+  return (Array.isArray(stored[REPLY_DIAGNOSTIC_HISTORY_KEY]) ? stored[REPLY_DIAGNOSTIC_HISTORY_KEY] : [])
+    .map(normalizeXinhuoReplyDiagnosticRecord)
+    .filter(Boolean)
+    .slice(0, MAX_REPLY_HISTORY_RECORDS);
+}
+
+async function getCombinedReplyRecords() {
+  const [replies, diagnostics] = await Promise.all([getReplyHistoryRecords(), getReplyDiagnosticRecords()]);
+  return [...replies, ...diagnostics]
+    .sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")))
     .slice(0, MAX_REPLY_HISTORY_RECORDS);
 }
 
@@ -1316,6 +1364,70 @@ async function recordReplyHistory(result) {
   await chrome.storage.local.set({ [REPLY_HISTORY_KEY]: next });
 }
 
+async function recordAIReplyDiagnostics(result, tweet, task) {
+  const failures = Array.isArray(result?.diagnostics) ? result.diagnostics.filter((item) => !item?.ok) : [];
+  if (!failures.length) return;
+  const hasTimeout = failures.some((item) => item.reason === "timeout");
+  const hasInvalidOutput = failures.some((item) => !["timeout", "api_error"].includes(item.reason));
+  const failureType = hasTimeout ? "ai_timeout" : (hasInvalidOutput ? "ai_invalid_output" : "ai_api_error");
+  const latest = failures.at(-1) || {};
+  await recordReplyDiagnosticHistory(buildReplyFailureRecord(
+    failureType,
+    latest.reasonText || "AI 生成未通过，已使用兜底回复",
+    task,
+    tweet,
+    failures
+  ));
+}
+
+function getAIReplyFailureType(diagnostics = []) {
+  const failures = Array.isArray(diagnostics) ? diagnostics.filter((item) => !item?.ok) : [];
+  if (failures.some((item) => item.reason === "timeout")) return "ai_timeout";
+  if (failures.some((item) => !["api_error"].includes(item.reason))) return "ai_invalid_output";
+  return "ai_api_error";
+}
+
+function isAIReplyFailureType(value) {
+  return ["ai_timeout", "ai_invalid_output", "ai_api_error"].includes(String(value || ""));
+}
+
+function buildReplyFailureRecord(failureType, message, task = runtimeState.currentTask || {}, tweet = {}, diagnostics = []) {
+  const labels = {
+    ai_timeout: "AI 请求超时",
+    ai_invalid_output: "AI 输出不合规",
+    ai_api_error: "AI 接口异常",
+    x_send_failed: "X 页面填入/发送失败"
+  };
+  return {
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    createdAt: new Date().toISOString(),
+    platform: "xinhuo",
+    kind: "diagnostic",
+    failureType: labels[failureType] ? failureType : "x_send_failed",
+    failureLabel: labels[failureType] || labels.x_send_failed,
+    failureMessage: String(message || "未知失败").slice(0, 280),
+    diagnostics: Array.isArray(diagnostics) ? diagnostics.slice(-6).map((item) => ({
+      stage: String(item?.stage || ""),
+      reason: String(item?.reason || ""),
+      reasonText: String(item?.reasonText || "").slice(0, 180)
+    })) : [],
+    taskKey: getXinhuoTaskIdentity(task),
+    detailPath: normalizeXinhuoTaskPath(task?.detailPath || task?.taskKey),
+    tweetUrl: normalizeTweetUrl(tweet?.url || task?.tweetUrl || ""),
+    tweetText: String(tweet?.text || task?.detailText || task?.candidateTitle || "").slice(0, 500),
+    taskType: task?.taskType || "评论",
+    bounty: Number(task?.bounty || 0)
+  };
+}
+
+async function recordReplyDiagnosticHistory(record) {
+  const normalized = normalizeXinhuoReplyDiagnosticRecord(record);
+  if (!normalized) return;
+  const prior = await getReplyDiagnosticRecords();
+  const next = [normalized, ...prior].slice(0, MAX_REPLY_HISTORY_RECORDS);
+  await chrome.storage.local.set({ [REPLY_DIAGNOSTIC_HISTORY_KEY]: next });
+}
+
 function normalizeXinhuoReplyRecord(record) {
   if (!record || typeof record !== "object") return null;
   const tweetUrl = normalizeTweetUrl(record.tweetUrl);
@@ -1330,6 +1442,33 @@ function normalizeXinhuoReplyRecord(record) {
     tweetUrl,
     tweetText: String(record.tweetText || "").slice(0, 500),
     replyText: String(record.replyText || "").slice(0, 280),
+    taskType: String(record.taskType || "评论"),
+    bounty: Number(record.bounty || 0) || 0
+  };
+}
+
+function normalizeXinhuoReplyDiagnosticRecord(record) {
+  if (!record || typeof record !== "object") return null;
+  const failureType = String(record.failureType || "");
+  const allowedTypes = new Set(["ai_timeout", "ai_invalid_output", "ai_api_error", "x_send_failed"]);
+  if (!allowedTypes.has(failureType)) return null;
+  return {
+    id: String(record.id || `${record.createdAt || "diagnostic"}-${failureType}`),
+    createdAt: String(record.createdAt || ""),
+    platform: "xinhuo",
+    kind: "diagnostic",
+    failureType,
+    failureLabel: String(record.failureLabel || failureType),
+    failureMessage: String(record.failureMessage || "未知失败").slice(0, 280),
+    diagnostics: Array.isArray(record.diagnostics) ? record.diagnostics.slice(-6).map((item) => ({
+      stage: String(item?.stage || ""),
+      reason: String(item?.reason || ""),
+      reasonText: String(item?.reasonText || "").slice(0, 180)
+    })) : [],
+    taskKey: getXinhuoTaskIdentity(record),
+    detailPath: normalizeXinhuoTaskPath(record.detailPath || record.taskKey),
+    tweetUrl: normalizeTweetUrl(record.tweetUrl),
+    tweetText: String(record.tweetText || "").slice(0, 500),
     taskType: String(record.taskType || "评论"),
     bounty: Number(record.bounty || 0) || 0
   };

@@ -221,15 +221,18 @@ await test("AI cancellation aborts fetch without a retry", async () => {
   await assert.rejects(pending, /任务已停止/);
   assert.equal(calls, 1);
 });
-await test("AI generation uses a 60s timeout and five retries", () => {
-  assert.match(engine, /const DEFAULT_AI_TIMEOUT_MS = 60000/);
+await test("AI generation uses a 120s timeout with one controlled timeout retry", () => {
+  assert.match(engine, /const DEFAULT_AI_TIMEOUT_MS = 120000/);
   assert.match(engine, /const MAX_AI_NORMAL_ATTEMPTS = 6/);
-  assert.match(background, /timeout: 60000/);
+  assert.match(engine, /const MAX_AI_TIMEOUT_ATTEMPTS = 2/);
+  assert.match(background, /const XINHUO_AI_TIMEOUT_MS = 120000/);
+  assert.match(background, /timeout: XINHUO_AI_TIMEOUT_MS/);
+  assert.doesNotMatch(engine, /pickUserFallbackReply\(tweetContent/);
   assert.match(background, /taskTitle:/);
 });
 await test("AI provider failure performs exactly five retries", async () => {
   let calls = 0;
-  const c = contextFor(engine, ["callAIProvider", "callAIWithSolaRetry", "createReplyDiagnostic", "clipReplyDiagnosticText", "countReplyChineseChars", "describeReplyFailureReason"], {
+  const c = contextFor(engine, ["callAIProvider", "callAIWithSolaRetry", "isAIRequestTimeoutError", "createReplyDiagnostic", "clipReplyDiagnosticText", "countReplyChineseChars", "describeReplyFailureReason"], {
     MAX_AI_NORMAL_ATTEMPTS: 6,
     MIN_REPLY_CHINESE_CHARS: 5,
     AI_PROVIDER_CONFIG: { deepseek: { endpoint: "https://invalid.test", model: "test" } },
@@ -244,6 +247,79 @@ await test("AI provider failure performs exactly five retries", async () => {
   assert.equal(calls, 6);
   assert.equal(result.diagnostics.length, 6);
   assert.ok(result.diagnostics.every((item) => item.reason === "api_error"));
+});
+await test("AI timeout records two diagnostics and stops after one controlled retry", async () => {
+  let calls = 0;
+  const c = contextFor(engine, ["callAIWithSolaRetry", "isAIRequestTimeoutError", "createReplyDiagnostic", "clipReplyDiagnosticText", "countReplyChineseChars", "describeReplyFailureReason"], {
+    MAX_AI_NORMAL_ATTEMPTS: 6,
+    MAX_AI_TIMEOUT_ATTEMPTS: 2,
+    MIN_REPLY_CHINESE_CHARS: 5,
+    callAIProvider: async () => {
+      calls += 1;
+      throw new Error("AI 请求超时：120000ms");
+    },
+    delay: async () => {}
+  });
+  const result = await c.callAIWithSolaRetry("openai", "test-key", "prompt", "tweet", {});
+  assert.equal(calls, 2);
+  assert.equal(result.diagnostics.length, 2);
+  assert.ok(result.diagnostics.every((item) => item.reason === "timeout"));
+  assert.ok(result.diagnostics.every((item) => /AI请求超时/.test(item.reasonText)));
+});
+await test("reply history diagnostics retain distinct AI and X failure categories", () => {
+  const c = contextFor(background, ["buildReplyFailureRecord"], {
+    runtimeState: { currentTask: {} },
+    getXinhuoTaskIdentity: () => "task-1",
+    normalizeXinhuoTaskPath: () => "/tasks/task-1",
+    normalizeTweetUrl: () => "https://x.com/test/status/1"
+  });
+  const timeout = c.buildReplyFailureRecord("ai_timeout", "AI请求超时", { taskKey: "task-1" });
+  const invalid = c.buildReplyFailureRecord("ai_invalid_output", "中文长度不合规", { taskKey: "task-1" });
+  const xSend = c.buildReplyFailureRecord("x_send_failed", "找不到回复框", { taskKey: "task-1" });
+  assert.equal(timeout.failureLabel, "AI 请求超时");
+  assert.equal(invalid.failureLabel, "AI 输出不合规");
+  assert.equal(xSend.failureLabel, "X 页面填入/发送失败");
+});
+await test("AI failure type is preserved through the X reply boundary", () => {
+  assert.match(engine, /error\.failureType = getAIReplyGenerationFailureType\(diagnostics\)/);
+  assert.match(xPage, /failureType: error\.failureType \|\| ""/);
+  assert.match(xPage, /error\.failureType = aiResponse\?\.failureType \|\| ""/);
+  assert.match(background, /if \(!isAIReplyFailureType\(reply\?\.failureType\)\)/);
+});
+await test("reply diagnostics persist separately and never become reply-dedupe history", async () => {
+  const storage = {};
+  const c = contextFor(background, ["getReplyDiagnosticRecords", "recordReplyDiagnosticHistory", "normalizeXinhuoReplyDiagnosticRecord"], {
+    REPLY_DIAGNOSTIC_HISTORY_KEY: "diagnostics",
+    MAX_REPLY_HISTORY_RECORDS: 200,
+    chrome: {
+      storage: {
+        local: {
+          async get(keys) {
+            return Object.fromEntries(keys.map((key) => [key, storage[key]]));
+          },
+          async set(values) {
+            Object.assign(storage, values);
+          }
+        }
+      }
+    },
+    getXinhuoTaskIdentity: (record) => record.taskKey || "",
+    normalizeXinhuoTaskPath: (value) => value || "",
+    normalizeTweetUrl: (value) => value || ""
+  });
+  await c.recordReplyDiagnosticHistory({
+    id: "timeout-1",
+    createdAt: "2026-09-15T10:26:43.000Z",
+    failureType: "ai_timeout",
+    failureLabel: "AI 请求超时",
+    failureMessage: "AI请求超时：120000ms",
+    taskKey: "task-1"
+  });
+  const diagnostics = await c.getReplyDiagnosticRecords();
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].kind, "diagnostic");
+  assert.equal(diagnostics[0].failureType, "ai_timeout");
+  assert.equal(storage.xinhuoReplyHistoryRecords, undefined);
 });
 await test("AI timeout has an explicit duration diagnostic", async () => {
   const c = contextFor(engine, ["callAIProvider"], {
@@ -381,10 +457,29 @@ if (platform === "xinhuo") {
     assert.match(noCooling, /暂无可立即接取/);
     assert.match(noCooling, /低于 0\.5 KX 已过滤/);
   });
+  await test("seat-race release plans return to plaza until the final minute", () => {
+    const c = contextFor(page, ["getDetailSeatReleasePlan", "getActiveAttemptedTaskKeys", "isClaimWindowCandidate"]);
+    const before = Date.now();
+    const raced = c.getDetailSeatReleasePlan(239000);
+    assert.equal(raced.returnToMarketplace, true);
+    assert.equal(raced.retryAfterMs, 179000);
+    assert.ok(raced.retryAt >= before + 178900);
+    assert.equal(c.getDetailSeatReleasePlan(60000).returnToMarketplace, false);
+    assert.equal(c.isClaimWindowCandidate({ ready: false, cooldownMs: 60000, anchor: { getAttribute: () => "false" } }), true);
+    assert.equal(c.isClaimWindowCandidate({ ready: false, cooldownMs: 60001, anchor: { getAttribute: () => "false" } }), false);
+  });
+  await test("expired plaza retry records become eligible without restarting the scan", () => {
+    const c = contextFor(page, ["getActiveAttemptedTaskKeys"]);
+    const now = Date.now();
+    assert.deepEqual([...c.getActiveAttemptedTaskKeys([
+      { key: "/tasks/expired", expiresAt: now - 1 },
+      { key: "/tasks/future", expiresAt: now + 1000 }
+    ])], ["/tasks/future"]);
+  });
   await test("dedupe registration logs each task exactly once with its identity", () => {
     const logs = [];
     const c = contextFor(background, [
-      "markAttemptedTask", "describeXinhuoTaskForLog", "getXinhuoTaskDedupeKeys",
+      "markAttemptedTask", "formatXinhuoRetryDelay", "describeXinhuoTaskForLog", "getXinhuoTaskDedupeKeys",
       "getXinhuoTaskIdentity", "normalizeXinhuoTaskPath", "normalizeTweetUrl"
     ], {
       runtimeState: { attemptedTasks: [] },
@@ -398,6 +493,20 @@ if (platform === "xinhuo") {
     assert.equal(logs.length, 1);
     assert.match(logs[0], /已登记去重 3 分钟：0\.200KX · @a · 标题/);
     assert.deepEqual([...c.runtimeState.attemptedTasks].map((item) => item.key), ["/tasks/abc", "https://x.com/a/status/1"]);
+  });
+  await test("seat-race retry expires at the next detail-entry window", () => {
+    const logs = [];
+    const c = contextFor(background, [
+      "markAttemptedTask", "formatXinhuoRetryDelay", "describeXinhuoTaskForLog", "getXinhuoTaskDedupeKeys",
+      "getXinhuoTaskIdentity", "normalizeXinhuoTaskPath", "normalizeTweetUrl"
+    ], {
+      runtimeState: { attemptedTasks: [] }, ATTEMPT_DEDUPE_MS: 180000,
+      XINHUO_TASKS_URL: "https://xinhuo123.com/tasks", log(_level, text) { logs.push(text); }
+    });
+    const retryAt = Date.now() + 179000;
+    c.markAttemptedTask({ taskKey: "/tasks/seat-race", retryAt });
+    assert.ok(c.runtimeState.attemptedTasks.every((item) => item.expiresAt >= retryAt - 5));
+    assert.match(logs[0], /2分59秒 后重新检测（下次放号前 1 分钟）/);
   });
   await test("Xinhuo workflow queue runs every remaining step in order", async () => {
     const commands = [];
@@ -507,8 +616,7 @@ if (platform === "xinhuo") {
       attempted: false, bounty: 0.1,
       anchor: { click() { location.pathname = "/tasks/a"; } }
     };
-    const c = contextFor(page, ["openFirstReadyTask", "isClaimWindowCandidate"], {
-      isClaimWindowCandidate: (task) => Boolean(task && !task.ready && Number(task.cooldownMs) > 0 && Number(task.cooldownMs) <= 5000),
+    const c = contextFor(page, ["openFirstReadyTask", "normalizeAttemptedTaskRecords", "getActiveAttemptedTaskKeys", "isClaimWindowCandidate"], {
       location,
       activeRunId: "r",
       async ensureTasksPage() {}, assertActive() {},
@@ -842,7 +950,7 @@ if (platform === "xinhuo") {
       ensureXinhuoMarketplaceTab: async () => ({ id: 1, url: "https://xinhuo123.com/tasks" }),
       assertXinhuoTab() {}, isXinhuoMarketplaceUrl: () => true,
       waitForTabComplete: async () => {}, setStage() {}, log() {}, delay: async () => {},
-      beginXinhuoXOpenWatch() {}, getAttemptedTaskKeys: () => [], markAttemptedTask() {},
+      beginXinhuoXOpenWatch() {}, getAttemptedTaskRecords: () => [], getAttemptedTaskKeys: () => [], markAttemptedTask() {},
       getSiteOpenedTargetXTab: async () => ({ id: 2 }), focusXinhuoXTab: async () => {},
       maintainXinhuoXForeground: async () => {},
       recordReplyHistory: async () => {}, beginXinhuoXSubmission() {}, clearXinhuoXSubmission() {},

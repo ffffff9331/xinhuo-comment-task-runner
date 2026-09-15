@@ -352,16 +352,20 @@ async function loadReplyRecords() {
 
 function renderReplyRecord(record) {
   const item = document.createElement("article");
-  item.className = "replyRecordItem";
+  item.className = `replyRecordItem${record.kind === "diagnostic" ? " replyRecordFailure" : ""}`;
   const meta = document.createElement("div");
   meta.className = "replyRecordMeta";
-  meta.textContent = `${formatDateTime(record.createdAt)} · ${record.taskType || "评论"} · ${record.bounty ?? "--"} KX`;
+  meta.textContent = record.kind === "diagnostic"
+    ? `${formatDateTime(record.createdAt)} · ${record.failureLabel || "失败诊断"}`
+    : `${formatDateTime(record.createdAt)} · ${record.taskType || "评论"} · ${record.bounty ?? "--"} KX`;
   const tweet = document.createElement("p");
   tweet.className = "replyRecordTweet";
   tweet.textContent = record.tweetText || record.taskTitle || "未记录到推文正文";
   const reply = document.createElement("p");
   reply.className = "replyRecordReply";
-  reply.textContent = record.replyText || "";
+  reply.textContent = record.kind === "diagnostic"
+    ? record.failureMessage || "未记录到失败详情"
+    : record.replyText || "";
   item.append(meta, tweet, reply);
   return item;
 }

@@ -76,7 +76,7 @@
       assertActiveRun(message.runId);
       return result;
     })
-      .catch((error) => ({ ok: false, message: error.message || String(error) }))
+      .catch((error) => ({ ok: false, message: error.message || String(error), failureType: error.failureType || "" }))
       .finally(() => {
         activeStepKey = "";
         activeStepName = "";
@@ -149,7 +149,9 @@
 
     const aiResponse = await aiPromise;
     if (!aiResponse || !aiResponse.ok || !aiResponse.replyText) {
-      throw new Error(aiResponse?.error || "AI 回复生成失败");
+      const error = new Error(aiResponse?.error || "AI 回复生成失败");
+      error.failureType = aiResponse?.failureType || "";
+      throw error;
     }
 
     const replyText = aiResponse.replyText;

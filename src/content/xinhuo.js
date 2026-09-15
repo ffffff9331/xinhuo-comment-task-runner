@@ -30,7 +30,7 @@
       const operation = { runId: message.runId };
       claimOperation = operation;
       operation.promise = Promise.resolve()
-        .then(() => selectAndClaim(message.settings || {}, message.attemptedTaskKeys || []))
+        .then(() => selectAndClaim(message.settings || {}, message.attemptedTaskRecords || [], message.attemptedTaskKeys || []))
         .catch((error) => ({ ok: false, message: error.message || String(error) }))
         .finally(() => { if (claimOperation === operation) claimOperation = null; });
       operation.promise.then(sendResponse);
@@ -46,7 +46,7 @@
       const operation = { runId: message.runId };
       claimOperation = operation;
       operation.promise = Promise.resolve()
-        .then(() => openFirstReadyTask(message.settings || {}, message.attemptedTaskKeys || []))
+        .then(() => openFirstReadyTask(message.settings || {}, message.attemptedTaskRecords || [], message.attemptedTaskKeys || []))
         .catch((error) => ({ ok: false, message: error.message || String(error) }))
         .finally(() => { if (claimOperation === operation) claimOperation = null; });
       operation.promise.then(sendResponse);
@@ -101,10 +101,10 @@
     return false;
   });
 
-  async function selectAndClaim(settings, attemptedTaskKeys) {
+  async function selectAndClaim(settings, attemptedTaskRecords, attemptedTaskKeys = []) {
     await ensureTasksPage(settings);
     const runId = activeRunId;
-    const attempted = new Set(attemptedTaskKeys || []);
+    const attempts = normalizeAttemptedTaskRecords(attemptedTaskRecords, attemptedTaskKeys);
     const pollMs = Math.max(500, Number(settings.cooldownPollMs) || 500);
     const minBounty = Math.max(0, Number(settings.xinhuoMinTaskBounty) || 0);
     let lastReportAt = 0;
@@ -116,12 +116,13 @@
     while (true) {
       assertActive(runId);
       if (hasAlreadyClaimed()) return getManuallyClaimedTask();
+      const attempted = getActiveAttemptedTaskKeys(attempts);
       const candidates = collectCandidates().filter((task) => meetsMinimumBounty(task, minBounty));
       const ready = candidates.filter((task) => task.ready && !task.attempted && !attempted.has(task.taskKey));
       const imminent = candidates.filter((task) => isClaimWindowCandidate(task) && !task.attempted && !attempted.has(task.taskKey)).sort((a, b) => a.cooldownMs - b.cooldownMs);
       const next = ready[0] || imminent[0];
       if (next) {
-        report(`${next.ready ? `发现 ${ready.length} 笔可立即接取的薪火任务，准备接取` : `发现薪火任务进入 5 秒抢单窗口（${formatDuration(next.cooldownMs)}）`}：${next.title || next.handle || "未命名任务"}`);
+        report(`${next.ready ? `发现 ${ready.length} 笔可立即接取的薪火任务，准备接取` : `发现薪火任务进入 1 分钟抢单窗口（${formatDuration(next.cooldownMs)}）`}：${next.title || next.handle || "未命名任务"}`);
         try {
           return await openAndClaim(next, settings, runId);
         } catch (error) {
@@ -157,10 +158,10 @@
     return `薪火任务广场已检查 ${bountyPassed.length} 笔评论、点赞或评论+点赞任务，暂无可立即接取（${detail}${lowBountyNote ? `、低于 ${minBounty} KX 已过滤` : ""}），继续等待刷新`;
   }
 
-  async function openFirstReadyTask(settings, attemptedTaskKeys) {
+  async function openFirstReadyTask(settings, attemptedTaskRecords, attemptedTaskKeys = []) {
     await ensureTasksPage(settings);
     const runId = activeRunId;
-    const attempted = new Set(attemptedTaskKeys || []);
+    const attempts = normalizeAttemptedTaskRecords(attemptedTaskRecords, attemptedTaskKeys);
     const pollMs = Math.max(500, Number(settings.cooldownPollMs) || 500);
     const minBounty = Math.max(0, Number(settings.xinhuoMinTaskBounty) || 0);
     let lastReportAt = 0;
@@ -172,6 +173,7 @@
 
     while (true) {
       assertActive(runId);
+      const attempted = getActiveAttemptedTaskKeys(attempts);
       const candidates = collectCandidates().filter((task) => meetsMinimumBounty(task, minBounty));
       const ready = candidates.filter((task) => task.ready && !task.attempted && !attempted.has(task.taskKey));
       const imminent = candidates.filter((task) => isClaimWindowCandidate(task) && !task.attempted && !attempted.has(task.taskKey)).sort((a, b) => a.cooldownMs - b.cooldownMs);
@@ -289,6 +291,24 @@
     return /当前等级不可接取|当前等级无席位|无席位|已满|已接取|进行中|待复核|额度不足|接单额度不足|今日接单.*上限|已达.*上限/.test(text);
   }
 
+  function normalizeAttemptedTaskRecords(records, legacyKeys = []) {
+    const now = Date.now();
+    const normalized = (Array.isArray(records) ? records : [])
+      .filter((item) => item && typeof item.key === "string")
+      .map((item) => ({ key: item.key, expiresAt: Number(item.expiresAt) || 0 }))
+      .filter((item) => item.expiresAt > now);
+    if (normalized.length || !Array.isArray(legacyKeys)) return normalized;
+    return legacyKeys.filter((key) => typeof key === "string" && key)
+      .map((key) => ({ key, expiresAt: Number.MAX_SAFE_INTEGER }));
+  }
+
+  function getActiveAttemptedTaskKeys(records) {
+    const now = Date.now();
+    return new Set((Array.isArray(records) ? records : [])
+      .filter((item) => item && item.expiresAt > now)
+      .map((item) => item.key));
+  }
+
   function meetsMinimumBounty(task, minimum) {
     if (minimum <= 0) return true;
     // The list sometimes renders the estimate as "-- KX" even for a task
@@ -297,7 +317,7 @@
   }
 
   function isClaimWindowCandidate(task) {
-    return Boolean(task && !task.ready && Number(task.cooldownMs) > 0 && Number(task.cooldownMs) <= 5000
+    return Boolean(task && !task.ready && Number(task.cooldownMs) > 0 && Number(task.cooldownMs) <= 60000
       && task.anchor?.getAttribute?.("aria-disabled") !== "true");
   }
 
@@ -306,16 +326,24 @@
     report(`已点击薪火任务入口：${candidate.title || candidate.handle || candidate.taskKey}，等待详情页加载`);
     candidate.anchor.click();
     await waitFor(() => location.pathname === new URL(candidate.href).pathname, 15000, "打开薪火任务详情超时");
-    await waitForClaimButtonAfterHydration(settings, runId);
+    const seatRelease = await waitForClaimButtonAfterHydration(settings, runId);
+    if (seatRelease?.returnToMarketplace) {
+      return {
+        ok: false,
+        retryable: true,
+        returnToMarketplace: true,
+        message: seatRelease.message,
+        task: buildUnclaimedTask(candidate, seatRelease)
+      };
+    }
     report("薪火任务详情已打开，正在定位接取按钮");
     assertActive(runId);
 
     return claimCurrentDetail(candidate, settings, runId, claimStartedAt);
   }
 
-  // A detail page can expose a release countdown before the claim button.
-  // Stay on the page and poll faster during the final second to catch the
-  // newly released seat instead of treating the countdown as a failure.
+  // Marketplace state can be stale during competitive claims. The official
+  // detail countdown decides whether to wait here or return to the plaza.
   async function waitForClaimButtonAfterHydration(settings, runId) {
     const timeoutMs = Math.max(15000, Number(settings.lockSeatTimeoutMs) || 60000);
     const pollMs = Math.min(Math.max(Number(settings.cooldownPollMs) || 500, 250), 500);
@@ -329,6 +357,12 @@
       const text = normalize(document.body.innerText || "");
       const remainingMs = parseDetailReleaseCountdownMs(text);
       if (remainingMs !== null) {
+        const plan = getDetailSeatReleasePlan(remainingMs);
+        if (plan.returnToMarketplace) {
+          const message = `当前轮次席位已被抢完，下一席位约 ${formatDuration(remainingMs)} 后释放；返回广场，剩余 1 分钟时重新进入抢位`;
+          report(message);
+          return { ...plan, message };
+        }
         if (remainingMs > 1000) {
           if (remainingMs !== lastCountdown && Date.now() - lastReportAt > 1000) {
             lastCountdown = remainingMs;
@@ -353,6 +387,17 @@
       await wait(pollMs);
     }
     throw new Error("薪火任务详情未显示接取状态");
+  }
+
+  function getDetailSeatReleasePlan(remainingMs) {
+    const value = Math.max(0, Number(remainingMs) || 0);
+    const detailWaitWindowMs = 60 * 1000;
+    if (value <= detailWaitWindowMs) return { returnToMarketplace: false, retryAt: 0 };
+    return {
+      returnToMarketplace: true,
+      retryAt: Date.now() + value - detailWaitWindowMs,
+      retryAfterMs: value - detailWaitWindowMs
+    };
   }
 
   function parseDetailReleaseCountdownMs(text) {
@@ -385,20 +430,18 @@
       }
       const claimOutcome = await waitForClaimOutcome(settings, runId);
       if (!claimOutcome.claimed) {
-        const task = {
-          source: "xinhuo_claim_not_acquired",
-          taskKey: candidate.taskKey,
-          taskType: candidate.taskType,
-          bounty: candidate.bounty,
-          handle: candidate.handle,
-          candidateTitle: candidate.title
-        };
-        report(`薪火未接到任务：${claimOutcome.reason}，立即返回任务广场继续扫描`);
+        const remainingMs = parseDetailReleaseCountdownMs(normalize(document.body.innerText || ""));
+        const seatRelease = remainingMs === null ? {} : getDetailSeatReleasePlan(remainingMs);
+        const task = buildUnclaimedTask(candidate, seatRelease);
+        const message = seatRelease.returnToMarketplace
+          ? `本轮席位已被抢完，下一席位约 ${formatDuration(remainingMs)} 后释放；返回广场，剩余 1 分钟时重新进入抢位`
+          : `薪火未接到任务：${claimOutcome.reason}，立即返回任务广场继续扫描`;
+        report(message);
         return {
           ok: false,
           retryable: true,
           returnToMarketplace: true,
-          message: `薪火未接到任务：${claimOutcome.reason}`,
+          message,
           task
         };
       }
@@ -415,6 +458,18 @@
     });
     report(`已接取薪火 ${task.taskType} 任务：${task.bounty.toFixed(3)} KX，等待薪火网站打开目标 X`);
     return { ok: true, task };
+  }
+
+  function buildUnclaimedTask(candidate, seatRelease = {}) {
+    return {
+      source: "xinhuo_seat_taken",
+      taskKey: candidate.taskKey,
+      taskType: candidate.taskType,
+      bounty: candidate.bounty,
+      handle: candidate.handle,
+      candidateTitle: candidate.title,
+      retryAt: Number(seatRelease.retryAt) || 0
+    };
   }
 
   function getManuallyClaimedTask(openedTask = {}) {
