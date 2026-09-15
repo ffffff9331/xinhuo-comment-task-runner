@@ -393,6 +393,7 @@ async function callAIWithSolaRetry(
     options,
     blacklistRetryCount,
     validation,
+    diagnostics,
     aiAttempt
   );
 }

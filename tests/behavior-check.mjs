@@ -266,6 +266,32 @@ await test("AI timeout records two diagnostics and stops after one controlled re
   assert.ok(result.diagnostics.every((item) => item.reason === "timeout"));
   assert.ok(result.diagnostics.every((item) => /AI请求超时/.test(item.reasonText)));
 });
+await test("AI invalid output keeps diagnostics when the next retry succeeds", async () => {
+  let calls = 0;
+  const c = contextFor(engine, ["callAIWithSolaRetry", "retryAIReplyAfterValidation"], {
+    MAX_AI_NORMAL_ATTEMPTS: 6,
+    callAIProvider: async () => {
+      calls += 1;
+      return calls === 1 ? "too-short" : "valid-reply";
+    },
+    createReplyDiagnostic: (_stage, _raw, _normalized, validation) => ({
+      ok: Boolean(validation.ok),
+      reason: validation.reason || ""
+    }),
+    normalizeBlacklistCandidateText: (text) => text,
+    validateFinalReplyText: (text) => text === "too-short"
+      ? { ok: false, reason: "length", blacklistWords: [] }
+      : { ok: true, reason: "", blacklistWords: [] },
+    getValidationRetryWords: () => ["reply length"],
+    enhanceSystemPromptWithBlacklist: (prompt) => prompt,
+    buildBlacklistCandidatePrompt: (prompt) => prompt,
+    delay: async () => {}
+  });
+  const result = await c.callAIWithSolaRetry("deepseek", "test-key", "prompt", "tweet", {});
+  assert.equal(calls, 2);
+  assert.equal(result.replyText, "valid-reply");
+  assert.equal(Array.from(result.diagnostics, (item) => item.reason).join("|"), "length|");
+});
 await test("prompt-declared reply length overrides the default cap while task minimum still applies", () => {
   const c = contextFor(engine, ["normalizeReplyMinChineseChars", "getPromptReplyLengthRange", "getReplyLengthRange", "isUsableReplyText", "validateFinalReplyText", "normalizeBlacklistCandidateText", "countReplyChineseChars"], {
     MIN_REPLY_CHINESE_CHARS: 5,
