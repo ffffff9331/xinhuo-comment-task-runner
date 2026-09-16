@@ -69,11 +69,11 @@ const XINHUO_FALLBACK_REPLIES = [
 ];
 const BLACKLIST_GLOBALS = {
   DEFAULT_AI_SYSTEM_PROMPT: "prompt",
-  DEFAULT_REPLY_BLACKLIST: ["\n", "确实", "有点东西", "真香"],
+  DEFAULT_REPLY_BLACKLIST: ["\n", "有点东西", "真香"],
   REPLY_STRUCTURAL_BLACKLIST: [{ label: "句首这系起手", regex: /^[\s'"“”‘’「」『』()（）【】]*?(?:这|这个|这条|这类|这种|这波)/i }],
   REPLY_HARD_BAN_PHRASES: ["值得关注"],
   MIN_REPLY_CHINESE_CHARS: 5,
-  MAX_REPLY_CHINESE_CHARS: 15,
+  MAX_REPLY_CHINESE_CHARS: 20,
   USER_FALLBACK_REPLIES,
   XINHUO_FALLBACK_REPLIES,
   fallbackReplyBag: [],
@@ -101,9 +101,21 @@ await test("long fallback bag honours the default range and configured limits ma
     const reply = await c.pickUserFallbackReply("tweet", { minChineseChars: 10 });
     seen.add(reply);
     const chars = c.countReplyChineseChars(reply);
-    assert.ok(chars >= 10 && chars <= 15, `fallback "${reply}" has ${chars} chinese chars, expected 10..15`);
+    assert.ok(chars >= 10 && chars <= 20, `fallback "${reply}" has ${chars} chinese chars, expected 10..20`);
   }
   assert.equal(seen.size, 6, "the long bag should serve six distinct replies before refilling");
+});
+
+await test("common word 确实 is accepted while the shipped blacklist also permits it", () => {
+  const c = contextFor(engine, [
+    "parseReplyBlacklistText", "validateFinalReplyText", "isUsableReplyText",
+    "normalizeReplyMinChineseChars", "getPromptReplyLengthRange", "getReplyLengthRange",
+    "normalizeBlacklistCandidateText", "countReplyChineseChars", "detectReplyTextDegeneration",
+    "checkBlacklistedWords", "getReplyBlacklistSnapshot", "escapeRegExp"
+  ], BLACKLIST_GLOBALS);
+  const shippedBlacklist = c.parseReplyBlacklistText(read("src/reply_blacklist.txt"));
+  assert.equal(shippedBlacklist.includes("确实"), false);
+  assert.equal(c.validateFinalReplyText("确实能感觉到细节做得挺用心", "10到20个汉字", { minChineseChars: 10 }).ok, true);
 });
 
 // Failure path: a fallback reply is posted verbatim when the AI fails, so it

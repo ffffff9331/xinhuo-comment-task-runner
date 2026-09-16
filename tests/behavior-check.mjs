@@ -295,7 +295,7 @@ await test("AI invalid output keeps diagnostics when the next retry succeeds", a
 await test("prompt-declared reply length overrides the default cap while task minimum still applies", () => {
   const c = contextFor(engine, ["normalizeReplyMinChineseChars", "getPromptReplyLengthRange", "getReplyLengthRange", "isUsableReplyText", "validateFinalReplyText", "normalizeBlacklistCandidateText", "countReplyChineseChars"], {
     MIN_REPLY_CHINESE_CHARS: 5,
-    MAX_REPLY_CHINESE_CHARS: 15,
+    MAX_REPLY_CHINESE_CHARS: 20,
     checkBlacklistedWords: () => ({ hasBlacklisted: false, words: [] }),
     detectReplyTextDegeneration: () => ({ blocked: false, reasonCode: "" })
   });
@@ -430,6 +430,17 @@ if (platform === "xinhuo") {
     context.runtimeState.stage = "finished";
     await context.handleXinhuoKeepaliveTick();
     assert.equal(cleared, 1);
+  });
+  await test("keepalive remains armed while an interrupted claimed Xinhuo order awaits an official state", async () => {
+    let cleared = 0;
+    const context = contextFor(background, ["handleXinhuoKeepaliveTick"], {
+      runtimeStateReady: Promise.resolve(),
+      runtimeState: { running: false, mode: "idle", stage: "claimed_task_recovery_blocked" },
+      tryResumeXinhuoAfterInterruption: async () => false,
+      clearXinhuoKeepalive: async () => { cleared += 1; }
+    });
+    await context.handleXinhuoKeepaliveTick();
+    assert.equal(cleared, 0);
   });
   await test("worker restart resumes an interrupted xinhuo run without a claimed order", async () => {
     let scans = 0;
@@ -745,6 +756,30 @@ if (platform === "xinhuo") {
     releaseSettings({ replyMode: "fill", autoSubmitXinhuo: true, aiApiKey: "key" });
     assert.equal((await first).ok, false);
   });
+  await test("manual Xinhuo start preserves a still-claimed interrupted order instead of scanning a new task", async () => {
+    const savedTask = { taskKey: "/tasks/a", detailPath: "/tasks/a", tweetUrl: "https://x.com/a/status/1", claimed: true };
+    let scans = 0;
+    let keepaliveClears = 0;
+    const c = contextFor(background, ["startXinhuoRun"], {
+      runtimeState: { running: false, mode: "idle", stage: "claimed_task_recovery_blocked", currentTask: savedTask },
+      getRecoverableInterruptedTask: () => savedTask,
+      createInitialState: () => ({ running: false, mode: "idle", currentTask: null, completed: 0, failed: 0 }),
+      createRunId: () => "manual-run",
+      getSettings: async () => ({ replyMode: "post", autoSubmitXinhuo: true, aiApiKey: "key" }),
+      getScheduleState: () => ({ inWindow: true }),
+      ensureXinhuoKeepalive: async () => {},
+      clearXinhuoKeepalive: async () => { keepaliveClears += 1; },
+      inspectInterruptedXinhuoOrder: async () => ({ kind: "claimed", tab: { id: 8 }, task: savedTask, message: "待复核" }),
+      setStage() {}, log() {},
+      runNextXinhuoTask: async () => { scans += 1; return { ok: true }; }
+    });
+    const result = await c.startXinhuoRun(1);
+    assert.equal(result.ok, false);
+    assert.equal(scans, 0);
+    assert.equal(c.runtimeState.currentTask.taskKey, "/tasks/a");
+    assert.equal(c.runtimeState.running, false);
+    assert.equal(keepaliveClears, 1);
+  });
   await test("concurrent marketplace initialization shares one tab lookup", async () => {
     let lookups = 0;
     let release;
@@ -820,7 +855,7 @@ if (platform === "xinhuo") {
   });
   await test("settings migration updates only the old default prompt and adds manual model", () => {
     const defaults = {
-      settingsVersion: 4, taskPlatform: "xinhuo", actionDelayMs: 1200, claimTimeoutMs: 60000,
+      settingsVersion: 5, taskPlatform: "xinhuo", actionDelayMs: 1200, claimTimeoutMs: 60000,
       cooldownPollMs: 500, xinhuoMinTaskBounty: 0, maxTasksPerRun: 9999, maxTaskAttempts: 9999,
       replyMode: "post", replyProvider: "native", autoSubmitXinhuo: true, aiProvider: "deepseek",
       aiModel: "", aiApiUrl: "", aiApiKey: "", aiSystemPrompt: "new prompt",
@@ -829,15 +864,20 @@ if (platform === "xinhuo") {
     const c = contextFor(background, ["migrateSettings", "normalizeSettings"], {
       DEFAULT_SETTINGS: defaults,
       XINHUO_DEFAULT_AI_SYSTEM_PROMPT: "new prompt",
+      XINHUO_PREVIOUS_DEFAULT_AI_SYSTEM_PROMPT: "previous default prompt",
       normalizeClock: (value, fallback) => /^\d{2}:\d{2}$/.test(String(value || "")) ? String(value) : fallback
     });
     const migrated = c.normalizeSettings({ settingsVersion: 1, aiProvider: "gpt-5.6-terra", aiSystemPrompt: "你是普通中文用户，帮我写一条推文回复。像路过随手回一句。" });
-    assert.equal(migrated.settingsVersion, 4);
+    assert.equal(migrated.settingsVersion, 5);
     assert.equal(migrated.aiProvider, "openai");
     assert.equal(migrated.aiModel, "gpt-5.6-terra");
     assert.equal(migrated.aiSystemPrompt, "new prompt");
     const custom = c.normalizeSettings({ settingsVersion: 1, aiSystemPrompt: "只写我自己的风格" });
     assert.equal(custom.aiSystemPrompt, "只写我自己的风格");
+    const upgraded = c.normalizeSettings({ settingsVersion: 4, aiSystemPrompt: "previous default prompt" });
+    assert.equal(upgraded.aiSystemPrompt, "new prompt");
+    const preservedCustomRange = c.normalizeSettings({ settingsVersion: 4, aiSystemPrompt: "保留我的 10 到 15 字自定义规则" });
+    assert.equal(preservedCustomRange.aiSystemPrompt, "保留我的 10 到 15 字自定义规则");
     const preserved = c.normalizeSettings({
       settingsVersion: 3,
       aiProvider: "gpt-5-nano",
@@ -861,6 +901,7 @@ if (platform === "xinhuo") {
     const c = contextFor(background, ["migrateSettings", "normalizeSettings"], {
       DEFAULT_SETTINGS: defaults,
       XINHUO_DEFAULT_AI_SYSTEM_PROMPT: "new prompt",
+      XINHUO_PREVIOUS_DEFAULT_AI_SYSTEM_PROMPT: "previous default prompt",
       normalizeClock: (value, fallback) => /^\d{2}:\d{2}$/.test(String(value || "")) ? String(value) : fallback
     });
     const normalized = c.normalizeSettings({
@@ -900,6 +941,7 @@ if (platform === "xinhuo") {
     const c = contextFor(background, ["migrateSettings", "normalizeSettings"], {
       DEFAULT_SETTINGS: defaults,
       XINHUO_DEFAULT_AI_SYSTEM_PROMPT: "new prompt",
+      XINHUO_PREVIOUS_DEFAULT_AI_SYSTEM_PROMPT: "previous default prompt",
       normalizeClock: (value, fallback) => /^\d{2}:\d{2}$/.test(String(value || "")) ? String(value) : fallback
     });
     const normalized = c.normalizeSettings({ settingsVersion: 4, aiProvider: "openai", aiModel: "   " });
@@ -976,7 +1018,7 @@ if (platform === "xinhuo") {
     assert.equal((await second).id, 2);
     assert.equal(creates, 1);
   });
-  await test("official completion wins when the X widget times out after the real submission", async () => {
+  await test("official completion wins when the X widget times out after a real submission attempt", async () => {
     const state = { runId: "r", running: true, completed: 0, attempts: 0 };
     const sent = [];
     const navigations = [];
@@ -1011,7 +1053,7 @@ if (platform === "xinhuo") {
         sent.push(message.type);
         if (message.type === "XINHUO_SELECT_AND_CLAIM") return { ok: true, task };
         if (message.type === "RUN_X_REPLY") return { ok: true };
-        if (message.type === "COMPLETE_X_TASK_WIDGET") return { ok: false, message: "组件观察超时" };
+        if (message.type === "COMPLETE_X_TASK_WIDGET") return { ok: false, submissionAttempted: true, message: "组件观察超时" };
         if (message.type === "XINHUO_WAIT_FOR_SUBMISSION_RESULT") return { ok: true, final: true };
         throw new Error(`Unexpected command ${message.type}`);
       }
@@ -1020,8 +1062,49 @@ if (platform === "xinhuo") {
     assert.equal(state.completed, 1);
     assert.equal(state.currentTask, null);
     assert.equal(sent.filter((s) => s === "COMPLETE_X_TASK_WIDGET").length, 1);
+    assert.equal(sent.filter((s) => s === "XINHUO_CONFIRM_AND_WAIT_VERIFICATION").length, 0);
+    assert.equal(sent.filter((s) => s === "XINHUO_WAIT_FOR_SUBMISSION_RESULT").length, 1);
     assert.equal(navigations.at(-1).url, "https://xinhuo123.com/tasks");
     assert.ok(navigations.every((n) => !n.url || n.url.startsWith("https://xinhuo123.com/")));
+  });
+  await test("unattempted X widget submission uses one current-order verification fallback", async () => {
+    const state = { runId: "r", running: true, completed: 0, attempts: 0 };
+    const sent = [];
+    const task = { taskKey: "/tasks/a", detailPath: "/tasks/a", claimed: true, tweetUrl: "https://x.com/a/status/1" };
+    const c = contextFor(background, ["runNextXinhuoTask"], {
+      runtimeState: state, XINHUO_TASKS_URL: "https://xinhuo123.com/tasks",
+      XINHUO_X_HYDRATION_MS: 0, XINHUO_FOREGROUND_MS: 0, XINHUO_VERIFICATION_POLL_MS: 0,
+      isActiveRun: (id) => state.running && state.runId === id,
+      getSettings: async () => ({ aiApiKey: "test", maxTasksPerRun: 1, maxTaskAttempts: 10, actionDelayMs: 0 }),
+      isLimitReached: (count, max) => count >= max,
+      finishRun: () => { state.running = false; return { ok: true }; },
+      ensureXinhuoMarketplaceTab: async () => ({ id: 1, url: "https://xinhuo123.com/tasks" }),
+      assertXinhuoTab() {}, isXinhuoMarketplaceUrl: () => true,
+      waitForTabComplete: async () => {}, setStage() {}, log() {}, delay: async () => {},
+      beginXinhuoXOpenWatch() {}, getAttemptedTaskRecords: () => [], getAttemptedTaskKeys: () => [], markAttemptedTask() {},
+      getSiteOpenedTargetXTab: async () => ({ id: 2 }), focusXinhuoXTab: async () => {},
+      maintainXinhuoXForeground: async () => {},
+      recordReplyHistory: async () => {}, beginXinhuoXSubmission() {}, clearXinhuoXSubmission() {},
+      mergeXinhuoTask: (current, next) => ({ ...(current || {}), ...(next || {}) }),
+      latchXinhuoCompletion: () => true,
+      buildXinhuoCompletionEvidence: () => ({ runId: "r", taskKey: "/tasks/a", tweetUrl: task.tweetUrl }),
+      waitForXinhuoFinalVerification: async (_tabId, _runId, _settings, initial) => initial,
+      finishXinhuoOfficialResult: async () => { state.completed += 1; state.currentTask = null; return { ok: true }; },
+      toContentSettings: (settings) => settings,
+      chrome: { tabs: { update: async () => {}, reload: async () => {} } },
+      sendToTab: async (_id, message) => {
+        sent.push(message.type);
+        if (message.type === "XINHUO_SELECT_AND_CLAIM") return { ok: true, task };
+        if (message.type === "RUN_X_REPLY") return { ok: true };
+        if (message.type === "COMPLETE_X_TASK_WIDGET") return { ok: false, message: "未检测到薪火 X 任务组件" };
+        if (message.type === "XINHUO_CONFIRM_AND_WAIT_VERIFICATION") return { ok: true, final: true, success: true, state: "confirmed" };
+        throw new Error(`Unexpected command ${message.type}`);
+      }
+    });
+    assert.equal((await c.runNextXinhuoTask("test")).ok, true);
+    assert.equal(state.completed, 1);
+    assert.equal(sent.filter((type) => type === "XINHUO_CONFIRM_AND_WAIT_VERIFICATION").length, 1);
+    assert.equal(sent.includes("XINHUO_WAIT_FOR_SUBMISSION_RESULT"), false);
   });
   await test("foreground keeper repeatedly focuses the task X tab until stopped", async () => {
     let focuses = 0;
@@ -1139,10 +1222,111 @@ if (platform === "xinhuo") {
     });
     assert.equal(c.getSubmissionState(c.getCurrentTaskDetailText()).kind, "confirmed");
   });
-  await test("X submission is followed only by read-only platform checks", () => {
+  await test("X submission fallback is gated to an unattempted widget submit and stale claims can be released", () => {
     const flow = declaration(background, "runNextXinhuoTask");
-    assert.doesNotMatch(flow, /type: "XINHUO_CONFIRM_AND_WAIT_VERIFICATION"|type: "XINHUO_SUBMIT_VERIFICATION"/);
-    assert.match(flow, /type: "XINHUO_WAIT_FOR_SUBMISSION_RESULT"/);
+    const release = declaration(background, "releaseXinhuoOrderIfNoLongerClaimed");
+    assert.match(flow, /const shouldUseDetailVerificationFallback = !submit\?\.ok/);
+    assert.match(flow, /!submit\?\.submissionAttempted/);
+    assert.match(flow, /type: shouldUseDetailVerificationFallback\s*\? "XINHUO_CONFIRM_AND_WAIT_VERIFICATION"/);
+    assert.match(flow, /"XINHUO_WAIT_FOR_SUBMISSION_RESULT"/);
+    assert.match(release, /type: "XINHUO_INSPECT_CURRENT_TASK"/);
+    assert.match(release, /inspection\?\.claimed !== false/);
+    assert.match(release, /clearCompletedXinhuoTaskState\(\)/);
+    assert.match(release, /recoverXinhuoRun\(/);
+  });
+  await test("released Xinhuo order clears stale state and resumes scanning, retained order stays untouched", async () => {
+    let inspection = { ok: true, claimed: false };
+    let cleared = 0;
+    let recovered = 0;
+    const state = { currentTask: { taskKey: "/tasks/a", claimed: true } };
+    const c = contextFor(background, ["releaseXinhuoOrderIfNoLongerClaimed"], {
+      runtimeState: state,
+      sendToTab: async () => inspection,
+      clearCompletedXinhuoTaskState: () => { cleared += 1; state.currentTask = null; },
+      log() {},
+      recoverXinhuoRun: async (message, stage) => {
+        recovered += 1;
+        return { ok: true, message, stage };
+      }
+    });
+    const released = await c.releaseXinhuoOrderIfNoLongerClaimed({ id: 7 }, "r");
+    assert.equal(released.ok, true);
+    assert.equal(released.stage, "released_claimed_task");
+    assert.equal(cleared, 1);
+    assert.equal(recovered, 1);
+    inspection = { ok: true, claimed: true };
+    state.currentTask = { taskKey: "/tasks/a", claimed: true };
+    assert.equal(await c.releaseXinhuoOrderIfNoLongerClaimed({ id: 7 }, "r"), null);
+    assert.equal(cleared, 1);
+    assert.equal(recovered, 1);
+  });
+  await test("interrupted Xinhuo order inspection distinguishes released, final, and still-claimed orders", async () => {
+    let inspection = { ok: false, claimed: false, message: "订单已释放" };
+    const task = { taskKey: "/tasks/a", detailPath: "/tasks/a", tweetUrl: "https://x.com/a/status/1", claimed: true };
+    const c = contextFor(background, ["inspectInterruptedXinhuoOrder"], {
+      runtimeState: { runId: "r" },
+      XINHUO_TASKS_URL: "https://xinhuo123.com/tasks",
+      normalizeXinhuoTaskPath: (value) => String(value || ""),
+      normalizeTweetUrl: (value) => String(value || ""),
+      getOrCreateXinhuoTab: async () => ({ id: 3, url: "https://xinhuo123.com/tasks/a" }),
+      assertXinhuoTab() {},
+      chrome: { tabs: { update: async () => ({ id: 3, url: "https://xinhuo123.com/tasks/a" }) } },
+      waitForTabComplete: async () => {},
+      sendToTab: async () => inspection,
+      mergeXinhuoTask: (...items) => Object.assign({}, ...items)
+    });
+    assert.equal((await c.inspectInterruptedXinhuoOrder(task)).kind, "released");
+    inspection = { ok: true, claimed: true, task: { ...task, officialState: { kind: "confirmed", final: true, success: true, message: "奖励已到账" } } };
+    assert.equal((await c.inspectInterruptedXinhuoOrder(task)).kind, "completed");
+    inspection = { ok: true, claimed: true, task: { ...task, officialState: { kind: "pending", final: false, message: "待复核" } } };
+    assert.equal((await c.inspectInterruptedXinhuoOrder(task)).kind, "claimed");
+  });
+  await test("worker restart releases stale or completed Xinhuo orders, but never scans past an active order", async () => {
+    let inspection = { kind: "released", message: "订单已释放" };
+    let scans = 0;
+    let released = 0;
+    const state = {
+      running: false, mode: "idle", stage: "interrupted_not_resumed", runId: "old",
+      completed: 2, failed: 0, xinhuoTabId: null, xTabId: 9, xTabWindowId: 1,
+      currentTask: { taskKey: "/tasks/a", detailPath: "/tasks/a", tweetUrl: "https://x.com/a/status/1", claimed: true }
+    };
+    const c = contextFor(background, ["tryResumeXinhuoAfterInterruption"], {
+      runtimeState: state,
+      inspectInterruptedXinhuoOrder: async () => inspection,
+      releaseXinhuoAttemptedTask: () => { released += 1; },
+      clearCompletedXinhuoTaskState: () => { state.currentTask = null; state.xTabId = null; state.xTabWindowId = null; },
+      clearXinhuoXOpenWatch() {}, clearXinhuoXSubmission() {}, describeXinhuoTaskForLog: () => "/tasks/a", log() {},
+      createRunId: () => "new", setStage: (stage) => { state.stage = stage; },
+      runNextXinhuoTask: async () => { scans += 1; return { ok: true }; }
+    });
+    assert.equal(await c.tryResumeXinhuoAfterInterruption(), true);
+    assert.equal(scans, 1);
+    assert.equal(state.currentTask, null);
+    assert.equal(released, 0);
+    inspection = { kind: "completed", message: "奖励已到账", task: { ...state.currentTask, completionCounted: false } };
+    state.running = false;
+    state.mode = "idle";
+    state.stage = "interrupted_not_resumed";
+    state.currentTask = { taskKey: "/tasks/a", detailPath: "/tasks/a", tweetUrl: "https://x.com/a/status/1", claimed: true };
+    assert.equal(await c.tryResumeXinhuoAfterInterruption(), true);
+    assert.equal(state.completed, 3);
+    assert.equal(released, 1);
+    inspection = { kind: "claimed", message: "待复核", tab: { id: 6 }, task: { taskKey: "/tasks/a", detailPath: "/tasks/a", tweetUrl: "https://x.com/a/status/1", claimed: true } };
+    state.running = false;
+    state.mode = "idle";
+    state.stage = "interrupted_not_resumed";
+    state.currentTask = { taskKey: "/tasks/a", detailPath: "/tasks/a", tweetUrl: "https://x.com/a/status/1", claimed: true };
+    assert.equal(await c.tryResumeXinhuoAfterInterruption(), false);
+    assert.equal(scans, 2);
+    assert.equal(state.currentTask.claimed, true);
+  });
+  await test("Xinhuo AI rule log states the effective default or custom length range", () => {
+    const c = contextFor(background, ["describeXinhuoReplyRule"], {
+      XINHUO_DEFAULT_AI_SYSTEM_PROMPT: "默认提示词",
+      getReplyLengthRange: (prompt) => prompt === "默认提示词" ? { min: 10, max: 20 } : { min: 12, max: 18 }
+    });
+    assert.match(c.describeXinhuoReplyRule({ aiSystemPrompt: "默认提示词" }, 10), /默认 Prompt · 中文 10-20 字 · 任务最低 10 字/);
+    assert.match(c.describeXinhuoReplyRule({ aiSystemPrompt: "自定义 12到18" }, 12), /自定义 Prompt · 中文 12-18 字 · 任务最低 12 字/);
   });
 } else {
   await test("missing cooldown is unknown, not zero; 10/19/50 second values stay ordered", () => {

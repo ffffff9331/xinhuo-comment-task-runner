@@ -1,4 +1,4 @@
-const DEFAULT_AI_SYSTEM_PROMPT = "根据原推文写一句自然的中文回复。像真实用户刷到后随手留下的感受，简短、有一点具体反应，不必完整表达观点。10到15个汉字为主，可保留必要的英文词。避免宣传腔、总结腔、夸张吹捧、复述原文和模板化感叹。只输出回复。";
+const DEFAULT_AI_SYSTEM_PROMPT = "根据原推文写一句自然的中文回复。像真实用户刷到后随手留下的感受，简短、有一点具体反应，不必完整表达观点。10到20个汉字为主，可保留必要的英文词。避免宣传腔、总结腔、夸张吹捧、复述原文和模板化感叹。只输出回复。";
 
 const AI_PROVIDER_CONFIG = {
   openai: {
@@ -65,7 +65,6 @@ const DEFAULT_REPLY_BLACKLIST = [
   "绝了",
   "有点东西",
   "有点意思",
-  "确实",
   "真实",
   "真本事",
   "我熟",
@@ -102,7 +101,7 @@ const REPLY_HARD_BAN_PHRASES = [
 ];
 
 const MIN_REPLY_CHINESE_CHARS = 5;
-const MAX_REPLY_CHINESE_CHARS = 15;
+const MAX_REPLY_CHINESE_CHARS = 20;
 // One initial request plus five retries for fast, recoverable provider errors.
 // A timeout gets exactly one delayed retry. Further retries can overlap with a
 // slow relay's in-flight request and cause duplicate paid calls.

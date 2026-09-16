@@ -18,10 +18,11 @@ const REPLY_DIAGNOSTIC_HISTORY_KEY = "xinhuoReplyDiagnosticHistoryRecords";
 const MAX_REPLY_HISTORY_RECORDS = 200;
 const XINHUO_AI_TIMEOUT_MS = 120000;
 const ATTEMPT_DEDUPE_MS = 3 * 60 * 1000;
-const XINHUO_DEFAULT_AI_SYSTEM_PROMPT = "根据原推文写一句自然的中文回复。像真实用户刷到后随手留下的感受，简短、有一点具体反应，不必完整表达观点。10到15个汉字为主，可保留必要的英文词。避免宣传腔、总结腔、夸张吹捧、复述原文和模板化感叹。只输出回复。";
+const XINHUO_PREVIOUS_DEFAULT_AI_SYSTEM_PROMPT = "根据原推文写一句自然的中文回复。像真实用户刷到后随手留下的感受，简短、有一点具体反应，不必完整表达观点。10到15个汉字为主，可保留必要的英文词。避免宣传腔、总结腔、夸张吹捧、复述原文和模板化感叹。只输出回复。";
+const XINHUO_DEFAULT_AI_SYSTEM_PROMPT = "根据原推文写一句自然的中文回复。像真实用户刷到后随手留下的感受，简短、有一点具体反应，不必完整表达观点。10到20个汉字为主，可保留必要的英文词。避免宣传腔、总结腔、夸张吹捧、复述原文和模板化感叹。只输出回复。";
 
 const DEFAULT_SETTINGS = {
-  settingsVersion: 4,
+  settingsVersion: 5,
   taskPlatform: "xinhuo",
   actionDelayMs: 1200,
   claimTimeoutMs: 60000,
@@ -479,16 +480,40 @@ async function startXinhuoRun(windowId) {
   await ensureXinhuoKeepalive();
   setStage("starting");
   log("info", "薪火自动接单已启动：只接当前等级可做的评论、点赞、评论+点赞任务");
-  const recovered = await findRecoverableClaimedXinhuoTask(recoverableTask);
-  if (recovered) {
-    runtimeState.xinhuoTabId = recovered.tab.id;
-    runtimeState.currentTask = recovered.task;
-    setStage("resuming_claimed_task");
-    log("warn", `检测到与中断记录完全匹配的薪火订单，继续处理：${recovered.task.detailPath}`);
-    return runNextXinhuoTask("resume_interrupted_claim", {
-      resumeTask: recovered.task,
-      resumeTabId: recovered.tab.id
-    });
+  if (recoverableTask) {
+    let inspection;
+    try {
+      inspection = await inspectInterruptedXinhuoOrder(recoverableTask);
+    } catch (error) {
+      runtimeState.currentTask = recoverableTask;
+      runtimeState.running = false;
+      setStage("claimed_task_recovery_blocked");
+      log("error", `启动前无法核对旧薪火订单：${error.message || String(error)}；已保留订单，不扫描新任务`);
+      await clearXinhuoKeepalive();
+      return { ok: false, error: "无法核对旧薪火订单，已保留订单", state: runtimeState };
+    }
+    if (inspection.kind === "claimed" || inspection.kind === "unknown") {
+      runtimeState.xinhuoTabId = inspection.tab?.id || runtimeState.xinhuoTabId;
+      runtimeState.currentTask = inspection.task || recoverableTask;
+      runtimeState.running = false;
+      setStage("claimed_task_recovery_blocked");
+      log("warn", `${inspection.message || "旧薪火订单仍未结束"}；已保留订单，不扫描新任务`);
+      await clearXinhuoKeepalive();
+      return { ok: false, error: "旧薪火订单仍在进行中或无法确认，未扫描新任务", state: runtimeState };
+    }
+    if (inspection.kind === "completed") {
+      releaseXinhuoAttemptedTask(inspection.task || recoverableTask);
+      if (!recoverableTask.completionCounted) runtimeState.completed += 1;
+      log("info", `启动前确认旧薪火订单已完成：${inspection.message}；返回广场继续扫描`);
+    } else if (inspection.kind === "failed") {
+      runtimeState.failed += 1;
+      log("warn", `启动前确认旧薪火订单未通过：${inspection.message}；返回广场继续扫描`);
+    } else {
+      log("warn", `启动前确认旧薪火订单已不在进行中：${inspection.message}；返回广场继续扫描`);
+    }
+    clearCompletedXinhuoTaskState();
+    clearXinhuoXOpenWatch();
+    clearXinhuoXSubmission();
   }
   return runNextXinhuoTask("start");
 }
@@ -610,6 +635,9 @@ async function runNextXinhuoTask(reason, options = {}) {
   }
   if (!isActiveRun(runId)) return { ok: false, state: runtimeState };
   const xClosedAfterSubmission = runtimeState.pendingXSubmission?.tabClosed === true;
+  const shouldUseDetailVerificationFallback = !submit?.ok
+    && !xClosedAfterSubmission
+    && !submit?.submissionAttempted;
   if (!submit?.ok && !xClosedAfterSubmission) {
     log("warn", `${submit?.message || "X 任务组件未确认提交"}；先回当前薪火订单读取官方结果，再决定是否失败`);
   } else {
@@ -619,18 +647,29 @@ async function runNextXinhuoTask(reason, options = {}) {
   }
 
   setStage("waiting_verification_result");
-  log("info", "正在回到当前薪火订单详情，只读核对结果，不重复使用 X API 补验");
+  log("info", shouldUseDetailVerificationFallback
+    ? "正在回到当前薪火订单详情，执行一次官方 X API 核验兜底"
+    : "正在回到当前薪火订单详情，只读核对结果，不重复使用 X API 补验");
   await delay(Math.max(1500, settings.actionDelayMs));
   await chrome.tabs.reload(xinhuoTab.id);
   await waitForTabComplete(xinhuoTab.id);
   await chrome.tabs.update(xinhuoTab.id, { active: true });
+  if (shouldUseDetailVerificationFallback) {
+    log("warn", "X 任务组件未找到或未点击提交控件，改为在当前薪火订单执行一次官方 X API 核验兜底");
+  }
   const confirmation = await sendToTab(xinhuoTab.id, {
-    type: "XINHUO_WAIT_FOR_SUBMISSION_RESULT",
+    type: shouldUseDetailVerificationFallback
+      ? "XINHUO_CONFIRM_AND_WAIT_VERIFICATION"
+      : "XINHUO_WAIT_FOR_SUBMISSION_RESULT",
     runId,
     task: runtimeState.currentTask,
     settings: toContentSettings(settings)
   });
   if (!isActiveRun(runId)) return { ok: false, state: runtimeState };
+  if (!confirmation?.ok) {
+    const released = await releaseXinhuoOrderIfNoLongerClaimed(xinhuoTab, runId);
+    if (released) return released;
+  }
   if (!submit?.ok && !xClosedAfterSubmission && !submit?.submissionAttempted && !confirmation?.ok) {
     return stopWithFailure(
       confirmation?.message || submit?.message || "X 组件和薪火官网均未确认任务提交，已保留当前订单",
@@ -639,6 +678,21 @@ async function runNextXinhuoTask(reason, options = {}) {
   }
   const finalConfirmation = await waitForXinhuoFinalVerification(xinhuoTab.id, runId, settings, confirmation);
   return finishXinhuoOfficialResult(xinhuoTab, runId, settings, finalConfirmation);
+}
+
+async function releaseXinhuoOrderIfNoLongerClaimed(xinhuoTab, runId) {
+  const inspection = await sendToTab(xinhuoTab.id, {
+    type: "XINHUO_INSPECT_CURRENT_TASK",
+    runId,
+    task: runtimeState.currentTask
+  });
+  if (inspection?.claimed !== false) return null;
+  clearCompletedXinhuoTaskState();
+  log("warn", "薪火官网已不再显示该订单为已接取或进行中，已清理旧订单并返回广场继续扫描");
+  return recoverXinhuoRun(
+    "薪火官网未保留当前已接订单，已退出旧订单恢复流程",
+    "released_claimed_task"
+  );
 }
 
 async function waitForXinhuoFinalVerification(tabId, runId, settings, initial = null) {
@@ -823,6 +877,8 @@ async function generateReply(tweet, task, runId = runtimeState.runId) {
   activeAIRequests.add(controller);
   try {
   const settings = await getSettings();
+  const taskMinChineseChars = Number(task?.minReplyChineseChars) || 10;
+  log("info", describeXinhuoReplyRule(settings, taskMinChineseChars));
   const result = await generateLighthouseAIReply({
     provider: settings.aiProvider,
     model: settings.aiModel,
@@ -832,7 +888,7 @@ async function generateReply(tweet, task, runId = runtimeState.runId) {
   }, {
     ...(tweet || {}),
     url: tweet?.url || task?.tweetUrl || ""
-  }, { minChineseChars: Number(task?.minReplyChineseChars) || 10, signal: controller.signal, timeout: XINHUO_AI_TIMEOUT_MS });
+  }, { minChineseChars: taskMinChineseChars, signal: controller.signal, timeout: XINHUO_AI_TIMEOUT_MS });
   if (controller.signal.aborted || runId !== runtimeState.runId || !runtimeState.running) throw new Error("任务已停止，丢弃 AI 结果");
   await recordAIReplyDiagnostics(result, tweet, task);
   if ((result.diagnostics || []).length) logReplyDiagnostics(result.diagnostics);
@@ -854,6 +910,13 @@ async function generateReply(tweet, task, runId = runtimeState.runId) {
   } finally {
     activeAIRequests.delete(controller);
   }
+}
+
+function describeXinhuoReplyRule(settings, taskMinChineseChars) {
+  const prompt = String(settings?.aiSystemPrompt || XINHUO_DEFAULT_AI_SYSTEM_PROMPT).trim();
+  const range = getReplyLengthRange(prompt, { minChineseChars: taskMinChineseChars });
+  const source = prompt === XINHUO_DEFAULT_AI_SYSTEM_PROMPT ? "默认 Prompt" : "自定义 Prompt";
+  return `薪火 AI 回复规则：${source} · 中文 ${range.min}-${range.max} 字 · 任务最低 ${taskMinChineseChars} 字`;
 }
 
 // The reply engine already returns per-round diagnostics (raw text, cleaned
@@ -908,6 +971,49 @@ async function findRecoverableClaimedXinhuoTask(savedTask) {
     return { tab, task: mergeXinhuoTask(savedTask, inspectedTask) };
   }
   return null;
+}
+
+async function inspectInterruptedXinhuoOrder(savedTask, options = {}) {
+  const detailPath = normalizeXinhuoTaskPath(savedTask?.detailPath || savedTask?.taskKey);
+  const tweetUrl = normalizeTweetUrl(savedTask?.tweetUrl);
+  if (!detailPath || !tweetUrl) return { kind: "unknown", message: "中断订单缺少详情或目标 X 身份" };
+
+  let tab = await getOrCreateXinhuoTab();
+  assertXinhuoTab(tab, "恢复前核对薪火订单");
+  if (normalizeXinhuoTaskPath(tab.url) !== detailPath) {
+    tab = await chrome.tabs.update(tab.id, {
+      url: new URL(detailPath, XINHUO_TASKS_URL).href,
+      active: options.activate !== false
+    });
+    await waitForTabComplete(tab.id);
+  }
+  const inspection = await sendToTab(tab.id, {
+    type: "XINHUO_INSPECT_CURRENT_TASK",
+    runId: runtimeState.runId,
+    task: savedTask
+  });
+  if (inspection?.claimed === false) {
+    return { kind: "released", tab, message: inspection.message || "薪火官网未保留该已接订单" };
+  }
+
+  const task = inspection?.task;
+  if (!inspection?.ok || !task?.claimed) {
+    return { kind: "unknown", tab, message: inspection?.message || "无法确认中断薪火订单状态" };
+  }
+  if (normalizeXinhuoTaskPath(task.detailPath || task.taskKey) !== detailPath
+      || normalizeTweetUrl(task.tweetUrl) !== tweetUrl) {
+    return { kind: "unknown", tab, message: "薪火详情身份与中断订单不一致" };
+  }
+  const officialState = task.officialState || null;
+  if (officialState?.final) {
+    return {
+      kind: officialState.success === false || officialState.kind === "failed" ? "failed" : "completed",
+      tab,
+      task: mergeXinhuoTask(savedTask, task),
+      message: officialState.message || "薪火官网已给出中断订单终态"
+    };
+  }
+  return { kind: "claimed", tab, task: mergeXinhuoTask(savedTask, task), message: officialState?.message || "薪火订单仍在进行中" };
 }
 
 function confirmationFromRecoveredTask(task, runId) {
@@ -1531,6 +1637,15 @@ function migrateSettings(settings) {
     next.settingsVersion = 4;
     changed = true;
   }
+  if (version < 5) {
+    const currentPrompt = String(next.aiSystemPrompt || "").trim();
+    if (currentPrompt === XINHUO_PREVIOUS_DEFAULT_AI_SYSTEM_PROMPT) {
+      next.aiSystemPrompt = XINHUO_DEFAULT_AI_SYSTEM_PROMPT;
+      changed = true;
+    }
+    next.settingsVersion = 5;
+    changed = true;
+  }
   return { settings: next, changed };
 }
 
@@ -1551,7 +1666,7 @@ function normalizeSettings(settings) {
   };
   return {
     ...merged,
-    settingsVersion: 4,
+    settingsVersion: 5,
     taskPlatform: "xinhuo",
     actionDelayMs: number(merged.actionDelayMs, DEFAULT_SETTINGS.actionDelayMs, 500, 10000),
     claimTimeoutMs: number(merged.claimTimeoutMs ?? merged.lockSeatTimeoutMs, DEFAULT_SETTINGS.claimTimeoutMs, 5000, 300000),
@@ -1768,17 +1883,48 @@ async function handleXinhuoKeepaliveTick() {
     return;
   }
   if (await tryResumeXinhuoAfterInterruption()) return;
+  if (runtimeState.mode === "idle" && runtimeState.stage === "claimed_task_recovery_blocked") return;
   await clearXinhuoKeepalive();
 }
 
 async function tryResumeXinhuoAfterInterruption() {
   if (runtimeState.running) return true;
-  if (runtimeState.mode !== "idle" || runtimeState.stage !== "interrupted_not_resumed") return false;
+  if (runtimeState.mode !== "idle" || !["interrupted_not_resumed", "claimed_task_recovery_blocked"].includes(runtimeState.stage)) return false;
   const savedTask = runtimeState.currentTask || {};
   const hasClaimedIncompleteOrder = Boolean(savedTask.claimed && !runtimeState.completionEvidence);
   if (hasClaimedIncompleteOrder) {
-    log("error", `service worker 重启后仍有已接取未完成的薪火订单（${describeXinhuoTaskForLog(savedTask)}），不自动续跑，请人工处理该订单后重新启动`);
-    return false;
+    let inspection;
+    try {
+      inspection = await inspectInterruptedXinhuoOrder(savedTask, { activate: false });
+    } catch (error) {
+      log("error", `service worker 重启后无法核对已接订单（${describeXinhuoTaskForLog(savedTask)}）：${error.message || String(error)}；已保留订单，不自动续跑`);
+      return false;
+    }
+    if (inspection.kind === "claimed") {
+      runtimeState.xinhuoTabId = inspection.tab?.id || runtimeState.xinhuoTabId;
+      runtimeState.currentTask = inspection.task || savedTask;
+      setStage("claimed_task_recovery_blocked");
+      log("error", `service worker 重启后订单仍在官网进行中（${describeXinhuoTaskForLog(savedTask)}）：${inspection.message}；已保留订单，不自动续跑`);
+      return false;
+    }
+    if (inspection.kind === "unknown") {
+      setStage("claimed_task_recovery_blocked");
+      log("error", `service worker 重启后未能确认已接订单（${describeXinhuoTaskForLog(savedTask)}）：${inspection.message}；已保留订单，不自动续跑`);
+      return false;
+    }
+    if (inspection.kind === "completed") {
+      releaseXinhuoAttemptedTask(inspection.task || savedTask);
+      if (!savedTask.completionCounted) runtimeState.completed += 1;
+      log("info", `service worker 重启后确认旧订单已完成：${inspection.message}；清理旧订单并恢复任务广场扫描`);
+    } else if (inspection.kind === "failed") {
+      runtimeState.failed += 1;
+      log("warn", `service worker 重启后确认旧订单未通过：${inspection.message}；清理旧订单并恢复任务广场扫描`);
+    } else {
+      log("warn", `service worker 重启后确认旧订单已不在进行中：${inspection.message}；清理旧订单并恢复任务广场扫描`);
+    }
+    clearCompletedXinhuoTaskState();
+    clearXinhuoXOpenWatch();
+    clearXinhuoXSubmission();
   }
   // The old content-script claim may still hold with the previous runId; cancel
   // it so the resumed scan is not answered with a conflict.

@@ -284,15 +284,29 @@
     const startedAt = Date.now();
     const timeoutMs = Math.max(60000, Number(settings.lockSeatTimeoutMs || 0));
     let submitText = "";
+    let widgetSeen = false;
+    let disabledSubmitText = "";
+    let widgetControlText = "";
 
     while (Date.now() - startedAt < timeoutMs) {
       assertActiveRun(runId);
       const xinhuoWidget = findXinhuoTaskWidget();
       if (xinhuoWidget) {
+        widgetSeen = true;
         const xinhuoSubmitButton = findXinhuoSubmitButton(xinhuoWidget);
         if (!xinhuoSubmitButton) {
           const settled = getXinhuoSubmissionState(xinhuoWidget);
           if (settled) return { ok: true, submitted: true, message: `薪火 X 任务已提交：${settled}` };
+          const disabledSubmit = getXinhuoTaskWidgetControls(xinhuoWidget)
+            .find((node) => normalizeText(getNodeActionText(node)) === "提交任务" && isButtonDisabled(node));
+          if (disabledSubmit) disabledSubmitText = getNodeActionText(disabledSubmit) || "提交任务";
+          if (!disabledSubmit) {
+            widgetControlText = getXinhuoTaskWidgetControls(xinhuoWidget)
+              .map((node) => normalizeText(getNodeActionText(node)))
+              .filter(Boolean)
+              .slice(0, 4)
+              .join("、");
+          }
           await wait(250);
           continue;
         }
@@ -311,7 +325,13 @@
       await wait(250);
     }
 
-    const reason = "停留时长或完成步骤尚未解锁，未找到可点击的提交任务按钮";
+    const reason = !widgetSeen
+      ? "未检测到薪火 X 任务组件"
+      : (disabledSubmitText
+        ? `薪火 X 任务组件的${disabledSubmitText}按钮尚未解锁`
+        : (widgetControlText
+          ? `薪火 X 任务组件未识别提交按钮，当前控件：${widgetControlText}`
+          : "已检测到薪火 X 任务组件，但未找到可点击的提交任务按钮"));
     return { ok: false, message: `X 任务闭环超时：${reason}${submitText ? `：${submitText}` : ""}` };
   }
 
