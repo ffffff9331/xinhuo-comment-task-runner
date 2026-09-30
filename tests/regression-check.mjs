@@ -139,10 +139,11 @@ for (const fn of sharedReplyPipelineFns) {
 }
 
 assert.match(background, /XINHUO_MARKETPLACE_IDLE_REFRESH_MS = 5 \* 60 \* 1000/);
-assert.match(background, /runtimeState\.stage === "selecting_task"/);
-assert.match(background, /!runtimeState\.currentTask/);
-assert.match(background, /Date\.now\(\) - Number\(runtimeState\.lastProgressAt \|\| 0\) >= XINHUO_MARKETPLACE_IDLE_REFRESH_MS/);
-assert.match(background, /chrome\.tabs\.reload\(runtimeState\.xinhuoTabId\)/);
+assert.match(background, /function shouldRestartXinhuoRunAfterNoClaim\(/);
+assert.match(background, /runtimeState\.stage !== "selecting_task"/);
+assert.match(background, /runtimeState\.marketplaceNoClaimSince/);
+assert.match(background, /now - marketplaceNoClaimSince >= XINHUO_MARKETPLACE_IDLE_REFRESH_MS/);
+assert.match(background, /chrome\.tabs\.reload\(marketplaceTabId\)/);
 assert.doesNotMatch(background, /case "CONTENT_LOG"[\s\S]{0,260}touchRunState\(\)/);
 
 console.log("Xinhuo regression checks passed.");

@@ -413,7 +413,7 @@ if (platform === "xinhuo") {
   await test("keepalive tick holds the alarm for an active run and clears it once idle", async () => {
     let cleared = 0;
     let platformPokes = 0;
-    const context = contextFor(background, ["handleXinhuoKeepaliveTick", "tryResumeXinhuoAfterInterruption", "clearXinhuoKeepalive"], {
+    const context = contextFor(background, ["handleXinhuoKeepaliveTick", "shouldRestartXinhuoRunAfterNoClaim", "tryResumeXinhuoAfterInterruption", "clearXinhuoKeepalive"], {
       XINHUO_KEEPALIVE_ALARM: "xinhuoAutoRunKeepaliveV1",
       runtimeStateReady: Promise.resolve(),
       runtimeState: { running: true, mode: "auto" },
@@ -430,6 +430,83 @@ if (platform === "xinhuo") {
     context.runtimeState.stage = "finished";
     await context.handleXinhuoKeepaliveTick();
     assert.equal(cleared, 1);
+  });
+  await test("a fresh Xinhuo marketplace no-claim window ignores a long-completed prior order", () => {
+    const now = 1_000_000;
+    const context = contextFor(background, ["shouldRestartXinhuoRunAfterNoClaim"], {
+      XINHUO_MARKETPLACE_IDLE_REFRESH_MS: 5 * 60 * 1000,
+      runtimeState: {
+        mode: "auto",
+        stage: "selecting_task",
+        currentTask: null,
+        lastProgressAt: now - 1000,
+        // A previous order may have been claimed long ago. It must not make
+        // the next empty marketplace scan restart immediately.
+        lastTaskClaimedAt: now - (20 * 60 * 1000),
+        marketplaceNoClaimSince: now
+      }
+    });
+    assert.equal(context.shouldRestartXinhuoRunAfterNoClaim(now + (5 * 60 * 1000) - 1), false);
+    assert.equal(context.shouldRestartXinhuoRunAfterNoClaim(now + (5 * 60 * 1000)), true);
+    context.runtimeState.currentTask = { claimed: true };
+    assert.equal(context.shouldRestartXinhuoRunAfterNoClaim(now + (5 * 60 * 1000)), false);
+  });
+  await test("Xinhuo scan entry starts the no-claim window before requesting marketplace tasks", async () => {
+    const now = 1_000_000;
+    const state = {
+      runId: "r", running: true, mode: "auto", stage: "auto_started", currentTask: null,
+      completed: 0, attempts: 0, marketplaceNoClaimSince: 0
+    };
+    const context = contextFor(background, ["runNextXinhuoTask"], {
+      Date: { now: () => now },
+      runtimeState: state,
+      XINHUO_TASKS_URL: "https://xinhuo123.com/tasks",
+      isActiveRun: () => state.running,
+      getSettings: async () => ({ aiApiKey: "test", maxTasksPerRun: 10, maxTaskAttempts: 10 }),
+      isLimitReached: () => false,
+      ensureXinhuoMarketplaceTab: async () => ({ id: 8, url: "https://xinhuo123.com/tasks" }),
+      assertXinhuoTab() {}, isXinhuoMarketplaceUrl: () => true,
+      setStage: (stage) => { state.stage = stage; }, log() {}, beginXinhuoXOpenWatch() {},
+      toContentSettings: (settings) => settings,
+      getAttemptedTaskRecords: () => [], getAttemptedTaskKeys: () => [],
+      sendToTab: async () => { state.running = false; return { ok: false }; }
+    });
+    await context.runNextXinhuoTask("test", { marketplaceReady: true });
+    assert.equal(state.marketplaceNoClaimSince, now);
+    assert.equal(state.stage, "selecting_task");
+  });
+  await test("Xinhuo keepalive restarts an expired empty scan once using the captured marketplace tab", async () => {
+    let stopped = 0;
+    const reloads = [];
+    const waits = [];
+    const starts = [];
+    const context = contextFor(background, ["handleXinhuoKeepaliveTick", "shouldRestartXinhuoRunAfterNoClaim"], {
+      XINHUO_MARKETPLACE_IDLE_REFRESH_MS: 5 * 60 * 1000,
+      runtimeStateReady: Promise.resolve(),
+      runtimeState: {
+        running: true,
+        mode: "auto",
+        stage: "selecting_task",
+        currentTask: null,
+        marketplaceNoClaimSince: 1,
+        marketplaceRefreshInFlight: false,
+        xinhuoTabId: 24,
+        windowId: 7
+      },
+      chrome: {
+        runtime: { async getPlatformInfo() { return {}; } },
+        tabs: { async reload(tabId) { reloads.push(tabId); } }
+      },
+      stopXinhuoRun: async () => { stopped += 1; },
+      waitForTabComplete: async (tabId) => { waits.push(tabId); },
+      startXinhuoRun: async (windowId) => { starts.push(windowId); },
+      log() {}
+    });
+    await Promise.all([context.handleXinhuoKeepaliveTick(), context.handleXinhuoKeepaliveTick()]);
+    assert.equal(stopped, 1);
+    assert.deepEqual(reloads, [24]);
+    assert.deepEqual(waits, [24]);
+    assert.deepEqual(starts, [7]);
   });
   await test("keepalive remains armed while an interrupted claimed Xinhuo order awaits an official state", async () => {
     let cleared = 0;

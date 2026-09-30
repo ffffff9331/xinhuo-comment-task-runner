@@ -551,6 +551,9 @@ async function runNextXinhuoTask(reason, options = {}) {
       await chrome.tabs.update(xinhuoTab.id, { url: XINHUO_TASKS_URL, active: true });
       await waitForTabComplete(xinhuoTab.id);
     }
+    if (runtimeState.mode === "auto" && !runtimeState.currentTask && Number(runtimeState.marketplaceNoClaimSince || 0) <= 0) {
+      runtimeState.marketplaceNoClaimSince = Date.now();
+    }
     setStage("selecting_task");
     log("info", `检测薪火可接任务：${reason} · tab=${xinhuoTab.id} · ${XINHUO_TASKS_URL}`);
     // Xinhuo can open X before the task-page script returns its claim result.
@@ -584,6 +587,9 @@ async function runNextXinhuoTask(reason, options = {}) {
 
   if (!resumingClaimedTask) runtimeState.attempts += 1;
   runtimeState.currentTask = mergeXinhuoTask(runtimeState.currentTask, result.task);
+  if (!resumingClaimedTask && runtimeState.currentTask?.claimed) {
+    runtimeState.marketplaceNoClaimSince = 0;
+  }
   markAttemptedTask(result.task);
   if (resumingClaimedTask && result.task?.officialState) {
     setStage("waiting_verification_result");
@@ -1716,7 +1722,7 @@ async function enterScheduleWait(schedule) {
 }
 
 function createInitialState() {
-  return { running: false, mode: "idle", stage: "idle", completed: 0, failed: 0, attempts: 0, windowId: null, xinhuoTabId: null, xTabId: null, xTabWindowId: null, currentTask: null, lastXResult: null, completionEvidence: null, pendingXOpen: null, pendingXSubmission: null, attemptedTasks: [], scheduledResumeAt: 0, lastProgressAt: Date.now(), runId: createRunId(), logs: [] };
+  return { running: false, mode: "idle", stage: "idle", completed: 0, failed: 0, attempts: 0, windowId: null, xinhuoTabId: null, xTabId: null, xTabWindowId: null, currentTask: null, lastXResult: null, completionEvidence: null, pendingXOpen: null, pendingXSubmission: null, attemptedTasks: [], scheduledResumeAt: 0, lastProgressAt: Date.now(), marketplaceNoClaimSince: 0, runId: createRunId(), logs: [] };
 }
 
 function createRunId() { sequence += 1; return `${Date.now()}-${sequence}`; }
@@ -1857,19 +1863,18 @@ async function handleXinhuoKeepaliveTick() {
   if (runtimeState.running && runtimeState.mode === "auto") {
     // The alarm wake restarts the idle window; an API touch makes it deterministic.
     try { await chrome.runtime.getPlatformInfo(); } catch (_) {}
-    if (runtimeState.stage === "selecting_task"
-      && !runtimeState.currentTask
-      && Date.now() - Number(runtimeState.lastProgressAt || 0) >= XINHUO_MARKETPLACE_IDLE_REFRESH_MS
+    if (shouldRestartXinhuoRunAfterNoClaim()
       && !runtimeState.marketplaceRefreshInFlight
       && Number.isInteger(runtimeState.xinhuoTabId)) {
       runtimeState.marketplaceRefreshInFlight = true;
       try {
         const windowId = runtimeState.windowId;
-        log("info", "薪火任务广场连续 5 分钟无活动，停止当前运行并重新执行全量检测");
+        const marketplaceTabId = runtimeState.xinhuoTabId;
+        log("info", "薪火连续 5 分钟未接到订单，停止当前运行并重新执行全量检测");
         await stopXinhuoRun();
-        if (Number.isInteger(runtimeState.xinhuoTabId)) {
-          await chrome.tabs.reload(runtimeState.xinhuoTabId);
-          await waitForTabComplete(runtimeState.xinhuoTabId);
+        if (Number.isInteger(marketplaceTabId)) {
+          await chrome.tabs.reload(marketplaceTabId);
+          await waitForTabComplete(marketplaceTabId);
         }
         void startXinhuoRun(windowId).catch((error) => {
           log("error", `薪火重新执行全量检测失败：${error.message || String(error)}`);
@@ -1885,6 +1890,16 @@ async function handleXinhuoKeepaliveTick() {
   if (await tryResumeXinhuoAfterInterruption()) return;
   if (runtimeState.mode === "idle" && runtimeState.stage === "claimed_task_recovery_blocked") return;
   await clearXinhuoKeepalive();
+}
+
+function shouldRestartXinhuoRunAfterNoClaim(now = Date.now()) {
+  if (runtimeState.mode !== "auto" || runtimeState.stage !== "selecting_task" || runtimeState.currentTask) {
+    return false;
+  }
+  const marketplaceNoClaimSince = Number(runtimeState.marketplaceNoClaimSince || 0);
+  return Number.isFinite(marketplaceNoClaimSince)
+    && marketplaceNoClaimSince > 0
+    && now - marketplaceNoClaimSince >= XINHUO_MARKETPLACE_IDLE_REFRESH_MS;
 }
 
 async function tryResumeXinhuoAfterInterruption() {
