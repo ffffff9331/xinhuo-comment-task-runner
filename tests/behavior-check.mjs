@@ -53,6 +53,23 @@ await test("stopped and stale messages are never sent, cancellation still reache
   assert.equal(sends, 1);
 });
 
+await test("stage changes do not reset the no-order refresh timer", () => {
+  let touches = 0;
+  let saves = 0;
+  const lastProgressAt = 12345;
+  const context = contextFor(background, ["setStage"], {
+    runtimeState: { stage: "selecting_task", lastProgressAt },
+    touchRunState: () => { touches += 1; },
+    persistRuntimeState: () => { saves += 1; }
+  });
+  context.setStage("task_select_failed");
+  context.setStage("selecting_task");
+  assert.equal(touches, 0);
+  assert.equal(saves, 2);
+  assert.equal(context.runtimeState.lastProgressAt, lastProgressAt);
+  assert.equal(context.runtimeState.stage, "selecting_task");
+});
+
 if (platform === "lighthouse") {
   await test("completion DOM rejects instructions and chooses result panel over page ancestor", () => {
     const make = (text, labels, width = 400, height = 300) => ({
@@ -1096,7 +1113,7 @@ if (platform === "xinhuo") {
     assert.equal(creates, 1);
   });
   await test("official completion wins when the X widget times out after a real submission attempt", async () => {
-    const state = { runId: "r", running: true, completed: 0, attempts: 0 };
+    const state = { runId: "r", running: true, completed: 0, attempts: 0, lastProgressAt: 1 };
     const sent = [];
     const navigations = [];
     const task = { taskKey: "/tasks/a", detailPath: "/tasks/a", claimed: true, tweetUrl: "https://x.com/a/status/1" };
@@ -1110,6 +1127,7 @@ if (platform === "xinhuo") {
       ensureXinhuoMarketplaceTab: async () => ({ id: 1, url: "https://xinhuo123.com/tasks" }),
       assertXinhuoTab() {}, isXinhuoMarketplaceUrl: () => true,
       waitForTabComplete: async () => {}, setStage() {}, log() {}, delay: async () => {},
+      touchRunState: () => { state.lastProgressAt = Date.now(); },
       beginXinhuoXOpenWatch() {}, getAttemptedTaskRecords: () => [], getAttemptedTaskKeys: () => [], markAttemptedTask() {},
       getSiteOpenedTargetXTab: async () => ({ id: 2 }), focusXinhuoXTab: async () => {},
       maintainXinhuoXForeground: async () => {},
@@ -1137,6 +1155,7 @@ if (platform === "xinhuo") {
     });
     assert.equal((await c.runNextXinhuoTask("test")).ok, true);
     assert.equal(state.completed, 1);
+    assert.ok(state.lastProgressAt > 1, "accepted order and confirmed completion reset the no-order timer");
     assert.equal(state.currentTask, null);
     assert.equal(sent.filter((s) => s === "COMPLETE_X_TASK_WIDGET").length, 1);
     assert.equal(sent.filter((s) => s === "XINHUO_CONFIRM_AND_WAIT_VERIFICATION").length, 0);

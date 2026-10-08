@@ -591,6 +591,10 @@ async function runNextXinhuoTask(reason, options = {}) {
     runtimeState.marketplaceNoClaimSince = 0;
   }
   markAttemptedTask(result.task);
+  // The five-minute watchdog measures time since the last real order event,
+  // not time since an internal stage transition.
+  if (typeof touchRunState === "function") touchRunState();
+  else runtimeState.lastProgressAt = Date.now();
   if (resumingClaimedTask && result.task?.officialState) {
     setStage("waiting_verification_result");
     log("info", "恢复的薪火订单已存在官网提交状态，直接核对官方最终结果，不重复回复或提交");
@@ -769,6 +773,8 @@ async function finishXinhuoOfficialResult(xinhuoTab, runId, settings, finalConfi
   }
   runtimeState.currentTask = { ...runtimeState.currentTask, completionCounted: true };
   runtimeState.completed += 1;
+  if (typeof touchRunState === "function") touchRunState();
+  else runtimeState.lastProgressAt = Date.now();
   // Completed orders are excluded by their own detail state; drop them from
   // the dedupe table so the next scan does not treat the plaza as stale.
   releaseXinhuoAttemptedTask(runtimeState.currentTask);
@@ -1735,7 +1741,7 @@ function assertXinhuoTab(tab, context = "薪火任务操作") {
 }
 function setStage(stage) {
   runtimeState.stage = stage;
-  touchRunState();
+  persistRuntimeState();
 }
 function log(level, text, meta = null) {
   const task = runtimeState.currentTask || {};
