@@ -591,8 +591,8 @@ async function runNextXinhuoTask(reason, options = {}) {
     runtimeState.marketplaceNoClaimSince = 0;
   }
   markAttemptedTask(result.task);
-  // The five-minute watchdog measures time since the last real order event,
-  // not time since an internal stage transition.
+  // Persist the claimed order state. The separate five-minute watchdog begins
+  // only after a later empty marketplace scan sets marketplaceNoClaimSince.
   if (typeof touchRunState === "function") touchRunState();
   else runtimeState.lastProgressAt = Date.now();
   if (resumingClaimedTask && result.task?.officialState) {
