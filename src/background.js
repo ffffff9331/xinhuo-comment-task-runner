@@ -36,7 +36,7 @@ const DEFAULT_SETTINGS = {
   autoSubmitXinhuo: true,
   aiProvider: "openai",
   aiModel: "gpt-5.6-terra",
-  aiApiUrl: "",
+  aiApiUrl: "https://api.vayne.cc.cd/v1/responses",
   aiApiKey: "",
   aiSystemPrompt: XINHUO_DEFAULT_AI_SYSTEM_PROMPT,
   runWindowEnabled: false,
@@ -46,13 +46,14 @@ const DEFAULT_SETTINGS = {
 
 let sequence = 0;
 let runtimeState = createInitialState();
-const runtimeStateReady = restoreRuntimeState();
+const runtimeStateReady = chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" }).then(restoreRuntimeState);
 const activeAIRequests = new Set();
 let directXinhuoXOpen = null;
 let xinhuoMarketplaceTabPromise = null;
 let manualDebugCommandTail = Promise.resolve();
 
 chrome.runtime.onInstalled.addListener(async () => {
+  await runtimeStateReady;
   const stored = await chrome.storage.local.get(["settings"]);
   const settings = normalizeSettings(stored.settings || {});
   if (JSON.stringify(stored.settings || {}) !== JSON.stringify(settings)) {
@@ -92,6 +93,10 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!isAuthorizedMessage(message, sender)) {
+    sendResponse({ ok: false, error: "消息来源无权执行此操作" });
+    return false;
+  }
   handleMessage(message, sender)
     .then(sendResponse)
     .catch((error) => {
@@ -110,6 +115,7 @@ async function handleMessage(message, sender) {
   }
   switch (type) {
     case "GET_STATE":
+      if (sender?.tab && !String(sender.url || "").startsWith("chrome-extension://")) return { ok: false, error: "完整设置仅限扩展界面访问" };
       return { ok: true, state: runtimeState, settings: await getSettings() };
     case "SAVE_SETTINGS": {
       const currentSettings = await getSettings();
@@ -152,6 +158,17 @@ async function handleMessage(message, sender) {
   }
 }
 
+function isAuthorizedMessage(message, sender) {
+  if (sender?.id !== chrome.runtime.id) return false;
+  if (String(sender.url || "").startsWith(chrome.runtime.getURL(""))) return true;
+  if (!Number.isInteger(sender?.tab?.id) || (sender.frameId ?? 0) !== 0) return false;
+  const url = String(sender.url || "");
+  if (/^https:\/\/(?:x|twitter)\.com\//.test(url)) {
+    return ["GENERATE_AI_REPLY", "QUERY_TWEET_REPLY_HISTORY"].includes(message?.type);
+  }
+  return /^https:\/\/xinhuo123\.com\//.test(url) && message?.type === "CONTENT_LOG";
+}
+
 function getMessageWindowId(message, sender) {
   const senderWindowId = sender?.tab?.windowId;
   if (Number.isInteger(senderWindowId)) return senderWindowId;
@@ -178,6 +195,11 @@ function enqueueManualDebugCommand(message, windowId) {
 }
 
 async function runManualDebugCommand(message, windowId) {
+  if (["DEBUG_XINHUO_OPEN_TASKS", "DEBUG_XINHUO_OPEN_FIRST_TASK"].includes(message.type)
+      && (runtimeState.uncertainAction || (runtimeState.currentTask?.claimed
+        && !hasLatchedXinhuoCompletion(runtimeState.completionEvidence?.runId)))) {
+    return { ok: false, error: "旧订单尚未核对，不能接管或打开另一任务", state: runtimeState };
+  }
   const lockResult = lockRuntimeWindowForCommand(windowId, message.type);
   if (!lockResult.ok) return { ok: false, error: lockResult.error, state: runtimeState };
   await prepareDebugRunForCommand(windowId, message.type);
@@ -256,6 +278,9 @@ function failDebugStep(result, fallback) {
 }
 
 async function debugOpenXinhuoTasks() {
+  if (runtimeState.uncertainAction || (runtimeState.currentTask?.claimed && !hasLatchedXinhuoCompletion(runtimeState.completionEvidence?.runId))) {
+    return { ok: false, error: "旧订单尚未核对，已保留当前订单和页面", state: runtimeState };
+  }
   const previousRunId = runtimeState.runId;
   const cancellations = [];
   if (runtimeState.xinhuoTabId) cancellations.push(sendToTab(runtimeState.xinhuoTabId, { type: "CANCEL_XINHUO_RUN", runId: previousRunId }));
@@ -279,6 +304,9 @@ async function debugOpenXinhuoTasks() {
 }
 
 async function debugOpenFirstXinhuoTask() {
+  if (runtimeState.uncertainAction || (runtimeState.currentTask?.claimed && !hasLatchedXinhuoCompletion(runtimeState.completionEvidence?.runId))) {
+    return { ok: false, error: "旧订单尚未核对，不能打开另一任务", state: runtimeState };
+  }
   const tab = await getOrCreateXinhuoTab();
   assertXinhuoTab(tab, "打开薪火任务详情前");
   runtimeState.xinhuoTabId = tab.id;
@@ -451,8 +479,13 @@ async function getCurrentXinhuoTaskTab() {
 
 async function startXinhuoRun(windowId) {
   if (runtimeState.running) return { ok: false, error: "薪火自动任务正在运行", state: runtimeState };
+  if (runtimeState.uncertainAction) return { ok: false, error: "旧动作结果未知，请先核对本单，未重新发送动作", state: runtimeState };
   const recoverableTask = getRecoverableInterruptedTask(runtimeState);
+  if (runtimeState.currentTask?.claimed && !recoverableTask) {
+    return { ok: false, error: "旧订单身份不完整，无法安全核对，已保留订单", state: runtimeState };
+  }
   runtimeState = createInitialState();
+  runtimeState.currentTask = recoverableTask;
   runtimeState.running = true;
   runtimeState.mode = "auto";
   runtimeState.runId = createRunId();
@@ -955,8 +988,7 @@ function formatReplyDiagnosticLogLine(item) {
 }
 
 function getRecoverableInterruptedTask(state) {
-  const recoverableStages = new Set(["interrupted_not_resumed", "claimed_task_recovery_blocked", "verification_pending"]);
-  const task = recoverableStages.has(state?.stage) ? state.currentTask : null;
+  const task = state?.running ? null : state?.currentTask;
   const detailPath = normalizeXinhuoTaskPath(task?.detailPath || task?.taskKey);
   const tweetUrl = normalizeTweetUrl(task?.tweetUrl);
   if (!task?.claimed || !detailPath || !tweetUrl) return null;
@@ -1062,6 +1094,7 @@ function latchXinhuoCompletion(evidence, runId) {
   const expectedUrl = normalizeTweetUrl(runtimeState.currentTask?.tweetUrl);
   if (!expectedUrl || normalizeTweetUrl(evidence.tweetUrl) !== expectedUrl) return false;
   runtimeState.completionEvidence = { ...evidence };
+  runtimeState.uncertainAction = null;
   touchRunState();
   return true;
 }
@@ -1312,20 +1345,79 @@ function consumeXinhuoOpenedXTab(tweetUrl) {
 
 async function sendToTab(tabId, payload) {
   payload = { ...payload, platform: "xinhuo", task: payload.task || runtimeState.currentTask };
+  const claimsOrder = ["XINHUO_SELECT_AND_CLAIM", "DEBUG_XINHUO_CLAIM_CURRENT_TASK"].includes(payload.type);
+  let claimIntent = null;
+  const sentState = runtimeState;
+  const sentRunId = runtimeState.runId;
+  const stale = () => runtimeState !== sentState || runtimeState.runId !== sentRunId;
+  const readOnlyOrCancel = /^(?:CANCEL_|XINHUO_INSPECT_|CHECK_|READ_)/.test(payload.type)
+    || payload.type === "XINHUO_WAIT_FOR_SUBMISSION_RESULT";
+  if (runtimeState.uncertainAction && !readOnlyOrCancel) {
+    return { ok: false, uncertain: true, message: "旧动作结果未知，禁止重复执行，请先核对本单" };
+  }
+  if (payload.settings) payload.settings = toContentSettings(payload.settings);
   for (let attempt = 0; attempt < 8; attempt += 1) {
     if (payload.runId && !payload.type.startsWith("CANCEL_") &&
         (payload.runId !== runtimeState.runId || !runtimeState.running)) {
       return { ok: false, cancelled: true, message: "流程已停止，不再重试旧消息" };
     }
     try {
-      return await chrome.tabs.sendMessage(tabId, payload);
+      if (runtimeState.uncertainAction && runtimeState.uncertainAction !== claimIntent && !readOnlyOrCancel) {
+        return { ok: false, uncertain: true, message: "旧动作结果未知，禁止重复执行，请先核对本单" };
+      }
+      if (claimsOrder && !claimIntent) {
+        claimIntent = { type: payload.type, taskKey: payload.task?.taskKey || "", runId: payload.runId, tabId };
+        runtimeState.uncertainAction = claimIntent;
+        // A terminated worker must retain an unanswered claim, even before its task is known.
+        await persistRuntimeState(true);
+        if (stale() || payload.runId !== runtimeState.runId || !runtimeState.running) {
+          if (runtimeState.uncertainAction === claimIntent) {
+            delete runtimeState.uncertainAction;
+            await persistRuntimeState(true);
+          }
+          return { ok: false, cancelled: true, message: "流程已停止，未发送接单动作" };
+        }
+      }
+      const result = await chrome.tabs.sendMessage(tabId, payload);
+      if (!payload.type.startsWith("CANCEL_") && (stale() || (payload.runId && !runtimeState.running))) {
+        return { ok: false, cancelled: true, message: "流程已变化，未采用旧回执" };
+      }
+      if (claimIntent && runtimeState.uncertainAction === claimIntent) {
+        if (result?.task?.claimed) {
+          runtimeState.currentTask = mergeXinhuoTask(runtimeState.currentTask, result.task);
+        } else if (!(result?.ok === false && result.retryable && result.returnToMarketplace && result.task?.claimed === false)) {
+          runtimeState.running = false;
+          setStage("action_result_unknown");
+          return { ok: false, uncertain: true, message: "接单回执未确认订单状态，已保留执行意图，请先核对本单" };
+        }
+        delete runtimeState.uncertainAction;
+        await persistRuntimeState(true);
+        if (stale() || (payload.runId && !runtimeState.running)) {
+          return { ok: false, cancelled: true, message: "流程已变化，订单已保存但不再继续旧流程" };
+        }
+      }
+      return result;
     } catch (error) {
+      if (!payload.type.startsWith("CANCEL_") && stale()) {
+        return { ok: false, cancelled: true, message: "流程已变化，未将旧错误写入当前任务" };
+      }
       if (runtimeState.pendingXSubmission?.tabId === tabId && runtimeState.pendingXSubmission?.tabClosed) {
         return { ok: false, tabClosedAfterSubmission: true };
       }
       if (isMissingReceiver(error)) {
+        if (claimIntent && runtimeState.uncertainAction === claimIntent) {
+          delete runtimeState.uncertainAction;
+          await persistRuntimeState(true);
+          claimIntent = null;
+        }
         const injected = await injectContentScript(tabId);
         if (injected) await delay(300);
+      } else if (!readOnlyOrCancel) {
+        runtimeState.uncertainAction = { type: payload.type, taskKey: payload.task?.taskKey || "", runId: payload.runId, tabId };
+        runtimeState.running = false;
+        runtimeState.stage = "action_result_unknown";
+        log("error", `动作 ${payload.type} 的回执丢失，结果未知；已停止，禁止自动重发，请先核对本单`);
+        return { ok: false, uncertain: true, message: "动作可能已执行，回执丢失，未自动重试" };
       }
       if (attempt === 7) {
         log("error", `页面通信失败：${error.message || String(error)}`);
@@ -1664,6 +1756,9 @@ function migrateSettings(settings) {
 function normalizeSettings(settings) {
   const migrated = migrateSettings(settings).settings;
   const merged = { ...DEFAULT_SETTINGS, ...migrated };
+  const aiApiUrl = "https://api.vayne.cc.cd/v1/responses";
+  const aiApiKey = String(settings?.aiApiUrl || "").trim() === aiApiUrl
+    ? String(merged.aiApiKey || "").trim() : "";
   const providerModelAlias = ["gpt-5-nano", "gpt-5.6-terra"].includes(merged.aiProvider)
     ? merged.aiProvider
     : "";
@@ -1693,8 +1788,8 @@ function normalizeSettings(settings) {
     aiProvider,
     aiModel: (String(merged.aiModel || "").trim() || providerModelAlias
       || (aiProvider === "openai" ? DEFAULT_SETTINGS.aiModel : "")).slice(0, 128),
-    aiApiUrl: String(merged.aiApiUrl || "").trim(),
-    aiApiKey: String(merged.aiApiKey || "").trim(),
+    aiApiUrl,
+    aiApiKey,
     aiSystemPrompt: String(merged.aiSystemPrompt || XINHUO_DEFAULT_AI_SYSTEM_PROMPT).trim(),
     runWindowEnabled: merged.runWindowEnabled === true,
     runWindowStart: normalizeClock(merged.runWindowStart, DEFAULT_SETTINGS.runWindowStart),
@@ -1703,7 +1798,11 @@ function normalizeSettings(settings) {
 }
 
 function toContentSettings(settings) {
-  return { ...settings, lockSeatTimeoutMs: settings.claimTimeoutMs };
+  const allowed = ["actionDelayMs", "claimTimeoutMs", "cooldownPollMs", "xinhuoMinTaskBounty", "replyMode", "replyProvider", "readingSimulationMs", "autoSubmitXinhuo"];
+  return {
+    ...Object.fromEntries(allowed.filter((key) => Object.hasOwn(settings, key)).map((key) => [key, settings[key]])),
+    lockSeatTimeoutMs: settings.claimTimeoutMs ?? settings.lockSeatTimeoutMs
+  };
 }
 
 function getScheduleState(settings) {
@@ -1826,20 +1925,21 @@ async function restoreRuntimeState() {
   try {
     const stored = await chrome.storage.local.get([RUN_STATE_KEY]);
     const saved = stored[RUN_STATE_KEY];
-    if (!saved || typeof saved !== "object" || !saved.running) return;
+    if (!saved || typeof saved !== "object") return;
+    const mayResume = saved.running === true && saved.mode === "auto" && !saved.uncertainAction;
     runtimeState = {
       ...createInitialState(),
       ...saved,
       running: false,
       mode: "idle",
-      stage: "interrupted_not_resumed",
+      stage: mayResume ? "interrupted_not_resumed" : "stopped",
       logs: Array.isArray(saved.logs) ? saved.logs.slice(0, 120) : [],
       pendingXOpen: null,
       pendingXSubmission: null,
       runId: saved.runId || createRunId()
     };
-    log("warn", "Chrome 后台恢复了中断的薪火状态，等待保活闹钟自动续跑");
-    await ensureXinhuoKeepalive();
+    log("warn", mayResume ? "Chrome 后台恢复了中断的薪火状态，等待保活闹钟自动续跑（先核对订单）" : "已恢复薪火订单记录，保持停止状态");
+    if (mayResume) await ensureXinhuoKeepalive();
   } catch (_) {
     // A missing or malformed snapshot should behave like a fresh idle worker.
   }
@@ -1910,6 +2010,7 @@ function shouldRestartXinhuoRunAfterNoClaim(now = Date.now()) {
 
 async function tryResumeXinhuoAfterInterruption() {
   if (runtimeState.running) return true;
+  if (runtimeState.uncertainAction) return false;
   if (runtimeState.mode !== "idle" || !["interrupted_not_resumed", "claimed_task_recovery_blocked"].includes(runtimeState.stage)) return false;
   const savedTask = runtimeState.currentTask || {};
   const hasClaimedIncompleteOrder = Boolean(savedTask.claimed && !runtimeState.completionEvidence);
@@ -1974,13 +2075,14 @@ function touchRunState() {
   persistRuntimeState();
 }
 
-function persistRuntimeState() {
+function persistRuntimeState(requireSuccess = false) {
   const snapshot = {
     ...runtimeState,
     pendingXOpen: null,
     pendingXSubmission: null,
     logs: Array.isArray(runtimeState.logs) ? runtimeState.logs.slice(0, 120) : []
   };
+  if (requireSuccess) return chrome.storage.local.set({ [RUN_STATE_KEY]: snapshot });
   chrome.storage.local.set({ [RUN_STATE_KEY]: snapshot }, () => {
     void chrome.runtime.lastError;
   });

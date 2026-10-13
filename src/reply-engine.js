@@ -193,12 +193,11 @@ async function callAIProvider(provider, apiKey, systemPrompt, tweetContent, opti
   const config = AI_PROVIDER_CONFIG[provider];
   if (!config) throw new Error(`Unsupported AI provider: ${provider}`);
   const requestModel = String(options.model || "").trim() || config.model;
+  const apiUrl = "https://api.vayne.cc.cd/v1/responses";
   const customApiUrl = String(options.apiUrl || "").trim();
-  const normalizedCustomApiUrl = normalizeCustomAIEndpoint(provider, customApiUrl);
-  if (customApiUrl && !normalizedCustomApiUrl) {
-    throw new Error("自定义 AI URL 无效或与当前接口协议不匹配");
+  if (customApiUrl && customApiUrl !== apiUrl) {
+    throw new Error("AI URL 已固定，请重新保存模型与 API Key");
   }
-  const apiUrl = normalizedCustomApiUrl || config.endpoint;
   const controller = new AbortController();
   const cancel = () => controller.abort(new Error("任务已停止"));
   if (options.signal?.aborted) throw new Error("任务已停止");
@@ -207,65 +206,6 @@ async function callAIProvider(provider, apiKey, systemPrompt, tweetContent, opti
   const timer = setTimeout(() => controller.abort(new Error(`AI 请求超时：${timeout}ms`)), timeout);
 
   try {
-    if (provider === "gemini" || provider === "gemini-flash") {
-      const body = {
-        contents: [
-          {
-            parts: [
-              {
-                text: `${systemPrompt}\n\nTweet: "${tweetContent}"\n\nReply:`
-              }
-            ]
-          }
-        ]
-      };
-      if (provider === "gemini") {
-        body.generationConfig = { thinkingConfig: { thinkingLevel: "low" } };
-      }
-      const response = await fetch(apiUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": apiKey
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal
-      });
-      const data = await readJsonResponse(response);
-      return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    }
-
-    // All OpenAI providers use the Responses API. Chat Completions fields such
-    // as `messages` and `temperature` are rejected by Responses gateways.
-    if (provider === "openai" || provider === "gpt-5-nano" || provider === "gpt-5.6-terra") {
-      const response = await fetch(apiUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`
-        },
-        body: JSON.stringify({
-          model: requestModel,
-          input: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: `Tweet: "${tweetContent}"\n\nGenerate a reply:` }
-          ],
-          max_output_tokens: 256
-        }),
-        signal: controller.signal
-      });
-      const data = await readJsonResponse(response);
-      if (typeof data.output_text === "string" && data.output_text.trim()) return data.output_text;
-      if (Array.isArray(data.output)) {
-        for (const item of data.output) {
-          const content = Array.isArray(item?.content) ? item.content : [];
-          const textItem = content.find((part) => typeof part?.text === "string" && part.text.trim());
-          if (textItem?.text) return textItem.text;
-        }
-      }
-      return "";
-    }
-
     const response = await fetch(apiUrl, {
       method: "POST",
       headers: {
@@ -274,16 +214,34 @@ async function callAIProvider(provider, apiKey, systemPrompt, tweetContent, opti
       },
       body: JSON.stringify({
         model: requestModel,
-        messages: [
+        input: [
           { role: "system", content: systemPrompt },
           { role: "user", content: `Tweet: "${tweetContent}"\n\nGenerate a reply:` }
         ],
-        temperature: 0.7
+        max_output_tokens: 256
       }),
-      signal: controller.signal
+      signal: controller.signal,
+      redirect: "error",
+      credentials: "omit"
     });
     const data = await readJsonResponse(response);
-    return data.choices?.[0]?.message?.content || "";
+    if (!data || data.error || data.incomplete_details
+        || (data.status && data.status !== "completed")
+        || (Array.isArray(data.output) && data.output.some((item) => item?.status && item.status !== "completed"))) {
+      const error = new Error("AI 响应未完整完成，未采用部分回复");
+      error.retryable = false;
+      throw error;
+    }
+    if (typeof data.output_text === "string" && data.output_text.trim()) return data.output_text;
+    if (Array.isArray(data.output)) {
+      for (const item of data.output) {
+        if (item?.type && item.type !== "message") continue;
+        const content = Array.isArray(item?.content) ? item.content : [];
+        const textItem = content.find((part) => (!part?.type || part.type === "output_text") && typeof part?.text === "string" && part.text.trim());
+        if (textItem?.text) return textItem.text;
+      }
+    }
+    return "";
   } finally {
     clearTimeout(timer);
     options.signal?.removeEventListener("abort", cancel);
@@ -311,9 +269,12 @@ async function callAIWithSolaRetry(
     const timedOut = isAIRequestTimeoutError(error);
     diagnostics.push(createReplyDiagnostic(stage, "", "", {
       reason: timedOut ? "timeout" : "api_error",
-      error: error?.message || String(error),
+      error: apiKey ? String(error?.message || error).split(apiKey).join("[REDACTED]") : String(error?.message || error),
       blacklistWords: []
     }));
+    if (error?.retryable === false || (error?.status && ![408, 409, 429].includes(error.status) && !(error.status >= 500 && error.status <= 599))) {
+      return { replyText: "", diagnostics };
+    }
     if (timedOut) {
       if (aiAttempt < MAX_AI_TIMEOUT_ATTEMPTS - 1) {
         await delay(2000);
@@ -450,12 +411,16 @@ async function retryAIReplyAfterValidation(
 }
 
 async function readJsonResponse(response) {
+  if (!response.ok) {
+    const error = new Error(`AI 请求失败（HTTP ${Number(response.status) || 0}）`);
+    error.status = Number(response.status) || 0;
+    throw error;
+  }
   const rawText = await response.text();
-  if (!response.ok) throw new Error(`HTTP ${response.status}: ${rawText.slice(0, 300)}`);
   try {
     return rawText ? JSON.parse(rawText) : {};
   } catch (error) {
-    throw new Error(`AI 响应不是有效 JSON: ${error.message}`);
+    throw new Error("AI 响应不是有效 JSON");
   }
 }
 
@@ -768,11 +733,11 @@ function appendReplyHardBanInstruction(systemPrompt) {
 
 function appendTaskReplyLengthInstruction(systemPrompt, options = {}) {
   const taskMin = normalizeReplyMinChineseChars(options.minChineseChars);
-  const currentRange = getReplyLengthRange(systemPrompt, options);
+  const currentRange = getReplyLengthRange(systemPrompt);
   if (taskMin <= currentRange.min) return systemPrompt;
   const min = Math.max(taskMin, currentRange.min);
   const max = Math.max(min, currentRange.max);
-  const rule = `任务硬性要求：中文回复必须不少于${min}个汉字，且不超过${max}个汉字。`;
+  const rule = `任务硬性要求（优先于前文的字数范围）：中文回复必须不少于${min}个汉字，且不超过${max}个汉字。`;
   return String(systemPrompt || "").includes(rule) ? String(systemPrompt || "") : `${String(systemPrompt || "").trim()}\n\n${rule}`.trim();
 }
 

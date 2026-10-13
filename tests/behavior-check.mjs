@@ -981,8 +981,8 @@ if (platform === "xinhuo") {
     });
     assert.equal(preserved.aiProvider, "openai");
     assert.equal(preserved.aiModel, "custom-model");
-    assert.equal(preserved.aiApiUrl, "https://relay.example/v1/responses");
-    assert.equal(preserved.aiApiKey, "secret");
+    assert.equal(preserved.aiApiUrl, "https://api.vayne.cc.cd/v1/responses");
+    assert.equal(preserved.aiApiKey, "");
   });
   await test("removing the provider control does not reroute an existing provider API key", () => {
     const defaults = {
@@ -1006,8 +1006,8 @@ if (platform === "xinhuo") {
       aiApiKey: "deepseek-key"
     });
     assert.equal(normalized.aiProvider, "deepseek");
-    assert.equal(normalized.aiApiUrl, "https://api.deepseek.com/chat/completions");
-    assert.equal(normalized.aiApiKey, "deepseek-key");
+    assert.equal(normalized.aiApiUrl, "https://api.vayne.cc.cd/v1/responses");
+    assert.equal(normalized.aiApiKey, "");
   });
   await test("manual AI model overrides the provider default in requests", async () => {
     let requestBody = null;

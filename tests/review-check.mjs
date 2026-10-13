@@ -194,9 +194,8 @@ await test("only the active reply step may survive a visible X compose route", a
   assert.throws(() => c.assertActiveRun("run-1"), /目标推文已变化/);
 });
 
-// The Gemini API key must travel in the x-goog-api-key header, never in the
-// request URL where it can leak into network/proxy logs.
-await test("gemini requests authenticate via header, not the URL query string", async () => {
+// Provider aliases now use the fixed Responses relay, with credentials in headers.
+await test("gemini models authenticate to the relay via header, never the URL", async () => {
   let fetchedUrl = "";
   let headers = null;
   const c = contextFor(engine, ["callAIProvider", "readJsonResponse"], {
@@ -210,11 +209,12 @@ await test("gemini requests authenticate via header, not the URL query string", 
     fetch: async (url, options) => {
       fetchedUrl = url;
       headers = options.headers;
-      return { ok: true, text: async () => JSON.stringify({ candidates: [{ content: { parts: [{ text: "好" }] } }] }) };
+      return { ok: true, text: async () => JSON.stringify({ output_text: "好" }) };
     }
   });
   assert.equal(await c.callAIProvider("gemini", "secret-key", "prompt", "tweet", { timeout: 100 }), "好");
-  assert.equal(headers["x-goog-api-key"], "secret-key");
+  assert.equal(headers.Authorization, "Bearer secret-key");
+  assert.equal(fetchedUrl, "https://api.vayne.cc.cd/v1/responses");
   assert.ok(!fetchedUrl.includes("key="), `API key leaked into the request URL: ${fetchedUrl}`);
 });
 

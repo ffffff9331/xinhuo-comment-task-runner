@@ -11,7 +11,6 @@ const fields = {
   autoSubmitXinhuo: document.getElementById("autoSubmitXinhuo"),
   actionDelayMs: document.getElementById("actionDelayMs"),
   aiModel: document.getElementById("aiModel"),
-  aiApiUrl: document.getElementById("aiApiUrl"),
   aiApiKey: document.getElementById("aiApiKey"),
   aiSystemPrompt: document.getElementById("aiSystemPrompt")
 };
@@ -200,7 +199,7 @@ function readSettings() {
     actionDelayMs: Number(fields.actionDelayMs.value),
     aiProvider: "openai",
     aiModel: fields.aiModel.value.trim(),
-    aiApiUrl: fields.aiApiUrl.value.trim(),
+    aiApiUrl: "https://api.vayne.cc.cd/v1/responses",
     aiApiKey: fields.aiApiKey.value.trim(),
     aiSystemPrompt: fields.aiSystemPrompt.value.trim()
   };
@@ -219,7 +218,6 @@ function renderSettings(settings) {
   fields.autoSubmitXinhuo.checked = Boolean(settings.autoSubmitXinhuo);
   fields.actionDelayMs.value = settings.actionDelayMs ?? 1200;
   fields.aiModel.value = settings.aiModel || "";
-  fields.aiApiUrl.value = settings.aiApiUrl || "";
   fields.aiApiKey.value = settings.aiApiKey || "";
   fields.aiSystemPrompt.value = settings.aiSystemPrompt || "";
 }

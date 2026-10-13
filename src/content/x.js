@@ -94,19 +94,6 @@
     assertActiveRun(runId);
     assertNotLoginWall();
     const tweet = scrapeCurrentTweet(task);
-    // Fire AI generation before the human-theatre steps so the network call
-    // overlaps with reading simulation, likes and dedupe scans.
-    const localDedupe = await queryLocalReplyHistory(tweet, task);
-    const aiPromise = localDedupe.replied ? null : chrome.runtime.sendMessage({
-      type: "GENERATE_AI_REPLY",
-      runId,
-      tweet,
-      task
-    });
-    // Early exits (follow failure, like-only tasks, dedupe hits) never await
-    // this; mark it handled so a late rejection cannot surface as unhandled.
-    // Awaiting it below still rethrows on the normal path.
-    if (aiPromise) aiPromise.catch(() => {});
     await simulateReadingBeforeReply(settings);
     assertActiveRun(runId);
 
@@ -147,7 +134,8 @@
       return buildDedupeReplyResult(tweet, dedupeResult, likeResult);
     }
 
-    const aiResponse = await aiPromise;
+    assertActiveRun(runId);
+    const aiResponse = await chrome.runtime.sendMessage({ type: "GENERATE_AI_REPLY", runId, tweet, task });
     if (!aiResponse || !aiResponse.ok || !aiResponse.replyText) {
       const error = new Error(aiResponse?.error || "AI 回复生成失败");
       error.failureType = aiResponse?.failureType || "";

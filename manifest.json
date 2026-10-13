@@ -37,10 +37,7 @@
     "https://x.com/*",
     "https://twitter.com/*",
     "https://*.xiaomimimo.com/*",
-    "https://api.openai.com/*",
-    "https://api.deepseek.com/*",
-    "https://api.x.ai/*",
-    "https://generativelanguage.googleapis.com/*"
+    "https://api.vayne.cc.cd/*"
   ],
   "optional_host_permissions": [
     "https://*/*"
