@@ -1,0 +1,178 @@
+:root {
+  color-scheme: dark;
+  --bg: #08110f;
+  --panel: #111a18;
+  --panel-strong: #172622;
+  --text: #f2fffb;
+  --muted: #8facaa;
+  --line: #29423d;
+  --accent: #30e0c7;
+  --accent-ink: #06211d;
+  --danger: #ff6b6b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  width: 360px;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+}
+
+.panel {
+  padding: 16px;
+}
+
+.header,
+.actions,
+.summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  color: var(--accent);
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+h1,
+h2 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+h2 {
+  margin-top: 16px;
+  font-size: 14px;
+}
+
+.badge {
+  min-width: 64px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-strong);
+  color: var(--muted);
+  text-align: center;
+  font-size: 12px;
+}
+
+.badge.running {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.field,
+.check {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.full,
+.check {
+  grid-column: 1 / -1;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  min-height: 34px;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0c1513;
+  color: var(--text);
+  font: inherit;
+  padding: 8px 10px;
+}
+
+textarea {
+  resize: vertical;
+}
+
+button {
+  border: 0;
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 700;
+  padding: 9px 10px;
+}
+
+.actions {
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.actions button {
+  flex: 1 1 calc(50% - 8px);
+}
+
+.primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.secondary {
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+}
+
+.danger {
+  background: transparent;
+  border: 1px solid rgba(255, 107, 107, 0.7);
+  color: var(--danger);
+}
+
+.summary {
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.logs {
+  display: grid;
+  gap: 8px;
+  max-height: 180px;
+  margin: 10px 0 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.logs li {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.logs .error {
+  color: var(--danger);
+}
