@@ -526,14 +526,14 @@ async function resolveCurrentXinhuoXTab() {
   const state = runtimeState;
   const runId = state.runId;
   const current = () => runtimeState === state && state.runId === runId && !state.manuallyStopped;
-  const expected = normalizeTweetUrl(runtimeState.currentTask?.tweetUrl);
+  const expected = normalizeTweetUrl(runtimeState.currentTask?.tweetUrl, true);
   if (!expected) throw new Error("当前薪火任务缺少目标 X 链接，请先执行接单开 X");
   const bound = await getBoundMatchingXinhuoXTab(expected);
   if (!current()) return null;
   if (bound) return bound;
   const query = { url: ["https://x.com/*", "https://twitter.com/*"] };
   if (Number.isInteger(runtimeState.windowId)) query.windowId = runtimeState.windowId;
-  const matches = (await chrome.tabs.query(query)).filter((tab) => normalizeTweetUrl(tab.url) === expected);
+  const matches = (await chrome.tabs.query(query)).filter((tab) => normalizeTweetUrl(tab.url, true) === expected);
   if (!current()) return null;
   const tab = matches.find((candidate) => candidate.active) || matches[0];
   if (!tab) throw new Error("未找到与当前薪火任务精确匹配的 X 标签页");
@@ -566,10 +566,10 @@ async function reconcileUncertainXinhuoClaim(windowId) {
   // extract a valid-looking path or status URL from a different address.
   const strictTaskPath = value => typeof value === "string"
     ? value.match(/^(?:https:\/\/xinhuo123\.com)?(\/tasks\/[A-Za-z0-9_-]+)$/)?.[1] || "" : "";
-  const strictTweetUrl = value => {
+  const strictTweetUrl = (value, identityOnly = false) => {
     if (typeof value !== "string") return "";
     const match = value.match(/^https:\/\/(?:x|twitter)\.com(\/[A-Za-z0-9_]+\/status\/[0-9]+)(?:\/(?:photo|video)\/[1-9][0-9]*)?\/?(?:[?#].*)?$/i);
-    return match ? `https://x.com${match[1]}` : "";
+    return match ? `https://x.com${identityOnly ? match[1].replace(/^\/[^/]+\//, "/i/") : match[1]}` : "";
   };
   const state = runtimeState;
   const intent = state.uncertainAction;
@@ -587,7 +587,7 @@ async function reconcileUncertainXinhuoClaim(windowId) {
     && [candidate?.detailPath, candidate?.taskKey, candidate?.claimedDetailPath]
       .filter(value => value !== undefined && value !== null && value !== "")
       .every(value => strictTaskPath(value) === detailPath)
-    && strictTweetUrl(candidate?.tweetUrl) === tweetUrl;
+    && strictTweetUrl(candidate?.tweetUrl, true) === strictTweetUrl(tweetUrl, true);
   if (!matchesTask(task) || (currentTask && !matchesTask(currentTask))) {
     return { ok: false, error: "旧领取记录与当前订单身份冲突，未解除任何订单保护" };
   }
@@ -1398,7 +1398,7 @@ async function findRecoverableClaimedXinhuoTask(savedTask) {
     const inspectedTask = inspected?.task;
     if (!inspected?.ok || !inspectedTask?.claimed) continue;
     if (normalizeXinhuoTaskPath(inspectedTask.detailPath || inspectedTask.taskKey) !== savedTask.detailPath) continue;
-    if (normalizeTweetUrl(inspectedTask.tweetUrl) !== savedTask.tweetUrl) continue;
+    if (normalizeTweetUrl(inspectedTask.tweetUrl, true) !== normalizeTweetUrl(savedTask.tweetUrl, true)) continue;
     return { tab, task: mergeXinhuoTask(savedTask, inspectedTask) };
   }
   return null;
@@ -1440,7 +1440,7 @@ async function inspectInterruptedXinhuoOrder(savedTask, options = {}) {
     return { kind: "unknown", tab, message: inspection?.message || "无法确认中断薪火订单状态" };
   }
   if (normalizeXinhuoTaskPath(task.detailPath || task.taskKey) !== detailPath
-      || normalizeTweetUrl(task.tweetUrl) !== tweetUrl) {
+      || normalizeTweetUrl(task.tweetUrl, true) !== normalizeTweetUrl(tweetUrl, true)) {
     return { kind: "unknown", tab, message: "薪火详情身份与中断订单不一致" };
   }
   const officialState = task.officialState || null;
@@ -1486,8 +1486,8 @@ function latchXinhuoCompletion(evidence, runId) {
   const expectedTaskKey = getXinhuoTaskIdentity(runtimeState.currentTask);
   const evidenceTaskKey = String(evidence.taskKey || normalizeXinhuoTaskPath(evidence.detailPath)).trim();
   if (!expectedTaskKey || evidenceTaskKey !== expectedTaskKey) return false;
-  const expectedUrl = normalizeTweetUrl(runtimeState.currentTask?.tweetUrl);
-  if (!expectedUrl || normalizeTweetUrl(evidence.tweetUrl) !== expectedUrl) return false;
+  const expectedUrl = normalizeTweetUrl(runtimeState.currentTask?.tweetUrl, true);
+  if (!expectedUrl || normalizeTweetUrl(evidence.tweetUrl, true) !== expectedUrl) return false;
   runtimeState.completionEvidence = { ...evidence };
   runtimeState.uncertainAction = null;
   touchRunState();
@@ -1499,7 +1499,7 @@ function hasLatchedXinhuoCompletion(runId) {
   return Boolean(evidence
     && evidence.runId === runId
     && evidence.taskKey === getXinhuoTaskIdentity(runtimeState.currentTask)
-    && normalizeTweetUrl(evidence.tweetUrl) === normalizeTweetUrl(runtimeState.currentTask?.tweetUrl));
+    && normalizeTweetUrl(evidence.tweetUrl, true) === normalizeTweetUrl(runtimeState.currentTask?.tweetUrl, true));
 }
 
 async function getOrCreateXinhuoTab() {
@@ -1682,8 +1682,8 @@ async function getBoundMatchingXinhuoXTab(expectedTweetUrl = "") {
   try {
     const tab = await chrome.tabs.get(runtimeState.xTabId);
     if (!current()) return null;
-    const expected = normalizeTweetUrl(expectedTweetUrl || runtimeState.currentTask?.tweetUrl);
-    const actual = normalizeTweetUrl(tab?.url);
+    const expected = normalizeTweetUrl(expectedTweetUrl || runtimeState.currentTask?.tweetUrl, true);
+    const actual = normalizeTweetUrl(tab?.url, true);
     if (!actual || (expected && actual !== expected)
         || (Number.isInteger(runtimeState.windowId) && tab.windowId !== runtimeState.windowId)) {
       runtimeState.xTabId = null;
@@ -1701,13 +1701,13 @@ async function getBoundMatchingXinhuoXTab(expectedTweetUrl = "") {
 }
 
 async function findTargetXTab(tweetUrl, openerTabId) {
-  const target = normalizeTweetUrl(tweetUrl);
+  const target = normalizeTweetUrl(tweetUrl, true);
   if (!target) return null;
   const query = { url: ["https://x.com/*", "https://twitter.com/*"] };
   if (Number.isInteger(runtimeState.windowId)) query.windowId = runtimeState.windowId;
   const pending = runtimeState.pendingXOpen;
   const matches = (await chrome.tabs.query(query))
-    .filter((tab) => tab.id !== openerTabId && normalizeTweetUrl(tab.url) === target);
+    .filter((tab) => tab.id !== openerTabId && normalizeTweetUrl(tab.url, true) === target);
   if (!matches.length) return null;
   return matches
     .filter((tab) => {
@@ -1763,8 +1763,8 @@ function recordPotentialXinhuoOpenedXTab(tab, created = false) {
 function consumeXinhuoOpenedXTab(tweetUrl) {
   const pending = runtimeState.pendingXOpen;
   if (!pending) return null;
-  const target = normalizeTweetUrl(tweetUrl);
-  const index = pending.candidates.findIndex((candidate) => normalizeTweetUrl(candidate.url) === target
+  const target = normalizeTweetUrl(tweetUrl, true);
+  const index = pending.candidates.findIndex((candidate) => normalizeTweetUrl(candidate.url, true) === target
     && Number(pending.createdAt?.[candidate.id] || 0) >= Number(pending.claimStartedAt || Infinity));
   if (index < 0) return null;
   const [candidate] = pending.candidates.splice(index, 1);
@@ -2078,7 +2078,8 @@ function isActiveRun(runId, mode = "auto") {
 
 function getAttemptedTaskRecords() {
   const now = Date.now();
-  runtimeState.attemptedTasks = (runtimeState.attemptedTasks || []).filter((item) => item.expiresAt > now);
+  runtimeState.attemptedTasks = (runtimeState.attemptedTasks || []).filter((item) => item.expiresAt > now)
+    .map(item => ({ ...item, key: normalizeTweetUrl(item.key, true) || item.key }));
   return runtimeState.attemptedTasks.map((item) => ({ key: item.key, expiresAt: item.expiresAt }));
 }
 
@@ -2090,18 +2091,18 @@ function releaseXinhuoAttemptedTask(task) {
   const keys = getXinhuoTaskDedupeKeys(task);
   if (!keys.length || !Array.isArray(runtimeState.attemptedTasks)) return;
   const released = new Set(keys);
-  runtimeState.attemptedTasks = runtimeState.attemptedTasks.filter((item) => !released.has(item.key));
+  runtimeState.attemptedTasks = runtimeState.attemptedTasks.filter((item) => !released.has(normalizeTweetUrl(item.key, true) || item.key));
 }
 
 function markAttemptedTask(task) {
   const keys = getXinhuoTaskDedupeKeys(task);
   if (!keys.length) return;
-  const existing = new Set((runtimeState.attemptedTasks || []).map((item) => item.key));
+  const existing = new Set((runtimeState.attemptedTasks || []).map((item) => normalizeTweetUrl(item.key, true) || item.key));
   const fresh = keys.filter((key) => !existing.has(key));
   const retryAt = Number(task?.retryAt) || 0;
   const expiresAt = retryAt > Date.now() ? retryAt : Date.now() + ATTEMPT_DEDUPE_MS;
   runtimeState.attemptedTasks = [
-    ...(runtimeState.attemptedTasks || []).filter((item) => item.expiresAt > Date.now() && !keys.includes(item.key)),
+    ...(runtimeState.attemptedTasks || []).filter((item) => item.expiresAt > Date.now() && !keys.includes(normalizeTweetUrl(item.key, true) || item.key)),
     ...keys.map((key) => ({ key, expiresAt }))
   ].slice(-100);
   if (fresh.length) {
@@ -2130,7 +2131,7 @@ function describeXinhuoTaskForLog(task = {}) {
 function getXinhuoTaskDedupeKeys(task) {
   return Array.from(new Set([
     getXinhuoTaskIdentity(task),
-    normalizeTweetUrl(task?.tweetUrl)
+    normalizeTweetUrl(task?.tweetUrl, true)
   ].filter(Boolean)));
 }
 
@@ -2158,11 +2159,11 @@ async function getCombinedReplyRecords() {
 }
 
 async function queryTweetReplyHistory(tweet, task) {
-  const tweetUrl = normalizeTweetUrl(tweet?.url || task?.tweetUrl || "");
+  const tweetUrl = normalizeTweetUrl(tweet?.url || task?.tweetUrl || "", true);
   const taskKey = getXinhuoTaskIdentity(task);
   if (!tweetUrl && !taskKey) return { ok: true, replied: false };
   const record = (await getReplyHistoryRecords()).find((item) => {
-    return (tweetUrl && normalizeTweetUrl(item.tweetUrl) === tweetUrl)
+    return (tweetUrl && normalizeTweetUrl(item.tweetUrl, true) === tweetUrl)
       || (taskKey && getXinhuoTaskIdentity(item) === taskKey);
   });
   return record ? { ok: true, replied: true, source: "local_reply_history", record, message: "本地记录显示该推文已回复" } : { ok: true, replied: false };
@@ -2190,7 +2191,7 @@ async function recordReplyHistory(result) {
   const prior = await getReplyHistoryRecords();
   if (runtimeState !== state || state.runId !== runId || state.manuallyStopped) return;
   const next = [record, ...prior.filter((item) => {
-    const sameTweet = record.tweetUrl && normalizeTweetUrl(item.tweetUrl) === record.tweetUrl;
+    const sameTweet = record.tweetUrl && normalizeTweetUrl(item.tweetUrl, true) === normalizeTweetUrl(record.tweetUrl, true);
     const sameTask = record.taskKey && getXinhuoTaskIdentity(item) === record.taskKey;
     return !sameTweet && !sameTask;
   })].slice(0, MAX_REPLY_HISTORY_RECORDS);
@@ -2619,7 +2620,19 @@ function stageToPagePhase(stage) {
   return phases[stage] || "unknown";
 }
 function delay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
-function normalizeTweetUrl(url) { const match = String(url || "").match(/https:\/\/(?:x|twitter)\.com\/[A-Za-z0-9_]+\/status\/\d+/i); return match ? match[0].replace("twitter.com", "x.com") : ""; }
+function normalizeTweetUrl(url, identityOnly = false) {
+  try {
+    const parsed = new URL(String(url || ""));
+    if (parsed.protocol !== "https:" || !["x.com", "twitter.com"].includes(parsed.hostname)
+        || parsed.port || parsed.username || parsed.password) return "";
+    const match = parsed.pathname.match(/^\/([A-Za-z0-9_]+)\/status\/([0-9]+)(?:\/(?:photo|video)\/[1-9][0-9]*)?\/?$/);
+    // X rewrites /i/status/:id to the author path. Compare the complete ID
+    // without replacing the navigation URL retained for the current task.
+    return match ? `https://x.com/${identityOnly ? "i" : match[1]}/status/${match[2]}` : "";
+  } catch (_) {
+    return "";
+  }
+}
 function normalizeXinhuoTaskPath(value) {
   try {
     const url = new URL(String(value || ""), XINHUO_TASKS_URL);

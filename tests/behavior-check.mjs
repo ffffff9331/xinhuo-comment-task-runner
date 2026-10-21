@@ -641,10 +641,10 @@ if (platform === "xinhuo") {
     });
     const task = { taskKey: "https://xinhuo123.com/tasks/abc", tweetUrl: "https://x.com/a/status/1", bounty: 0.2, handle: "@a", candidateTitle: "标题" };
     c.markAttemptedTask(task);
-    c.markAttemptedTask(task);
+    c.markAttemptedTask({ ...task, tweetUrl: "https://x.com/i/status/1" });
     assert.equal(logs.length, 1);
     assert.match(logs[0], /已登记去重 3 分钟：0\.200KX · @a · 标题/);
-    assert.deepEqual([...c.runtimeState.attemptedTasks].map((item) => item.key), ["/tasks/abc", "https://x.com/a/status/1"]);
+    assert.deepEqual([...c.runtimeState.attemptedTasks].map((item) => item.key), ["/tasks/abc", "https://x.com/i/status/1"]);
   });
   await test("seat-race retry expires at the next detail-entry window", () => {
     const logs = [];

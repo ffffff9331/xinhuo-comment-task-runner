@@ -225,6 +225,24 @@ function assertPreserved(w) {
   assert.ok(w.mutations.length <= 1, "fresh inspection may refresh only the exact saved order once");
 }
 
+for (const kind of ["unclaimed", "claimed"]) test(`same-ID aliases reconcile the saved intent and current order without weakening ${kind} protection`, async t => {
+  const alias = TARGET.replace("/fixture/status/", "/i/status/");
+  const w = await worker(t, { kind, task: { tweetUrl: alias }, intent: {
+    task: { taskKey: TASK_PATH, detailPath: TASK_PATH, tweetUrl: TARGET }
+  } });
+  if (kind === "unclaimed") {
+    assert.equal((await w.untilScan()).scan, true);
+    assert.equal(w.state().uncertainAction, undefined);
+    assert.equal(w.scans.length, 1);
+  } else {
+    assert.equal((await w.start()).ok, false);
+    assert.equal(w.state().uncertainAction, w.oldIntent);
+    assert.equal(w.state().currentTask.tweetUrl, alias);
+    assert.equal(w.scans.length, 0);
+  }
+  assert.equal(w.sent.filter(message => message.type === INSPECT).length, 1);
+});
+
 for (const type of ["XINHUO_SELECT_AND_CLAIM", "DEBUG_XINHUO_CLAIM_CURRENT_TASK", "XINHUO_CLAIM"]) {
   for (const kind of ["unclaimed", "completed", "expired"]) test(`${type}: START releases only the bound ${kind} order before scanning`, async t => {
     const w = await worker(t, { type, kind });

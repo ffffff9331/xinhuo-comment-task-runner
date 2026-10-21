@@ -2,7 +2,7 @@
   // Keep Xinhuo page state namespaced so another X extension cannot replace it.
   const SINGLETON_KEY = "__xinhuoCommentTaskRunnerXSingleton__";
   const RUN_LOCK_KEY = "__xinhuoCommentTaskRunnerXRunLock__";
-  const SCRIPT_VERSION = "0.1.50";
+  const SCRIPT_VERSION = "0.1.51";
   const INSTANCE_ID = `x-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const RESERVED_X_HANDLE_SLUGS = new Set(["home", "explore", "notifications", "messages", "jobs", "i", "settings"]);
   const existingSingleton = globalThis[SINGLETON_KEY];
@@ -65,12 +65,12 @@
 
   function executeXStep(message, action) {
     const target = normalizeTweetUrl(message.task?.tweetUrl || "");
-    if (!message.runId || message.platform !== "xinhuo" || !target || target !== normalizeTweetUrl(location.href)) {
+    if (!message.runId || message.platform !== "xinhuo" || !target || normalizeTweetUrl(target, true) !== normalizeTweetUrl(location.href, true)) {
       return Promise.resolve({ ok: false, message: "拒绝执行：平台或当前任务推文不匹配" });
     }
     if (cancelledRunIds.has(message.runId)) return Promise.resolve({ ok: false, cancelled: true, message: "任务已取消" });
     const step = message.type === "CLICK_X_TASK_VERIFY" ? "COMPLETE_X_TASK_WIDGET" : message.type;
-    const key = [message.runId, message.task.detailPath || message.task.taskKey || target, target, step].join("|");
+    const key = [message.runId, message.task.detailPath || message.task.taskKey || normalizeTweetUrl(target, true), normalizeTweetUrl(target, true), step].join("|");
     if (stepResults.has(key)) return stepResults.get(key);
     if (activeStepKey || globalThis[RUN_LOCK_KEY]?.active) {
       return Promise.resolve({ ok: false, conflict: true, message: "另一任务步骤仍在执行，未触发新操作" });
@@ -1783,9 +1783,18 @@
     return wait(500 + Math.floor(Math.random() * 1001));
   }
 
-  function normalizeTweetUrl(url) {
-    const match = String(url || "").match(/https:\/\/(?:x|twitter)\.com\/[A-Za-z0-9_]+\/status\/\d+/i);
-    return match ? match[0].replace("twitter.com", "x.com") : "";
+  function normalizeTweetUrl(url, identityOnly = false) {
+    try {
+      const parsed = new URL(String(url || ""));
+      if (parsed.protocol !== "https:" || !["x.com", "twitter.com"].includes(parsed.hostname)
+          || parsed.port || parsed.username || parsed.password) return "";
+      const match = parsed.pathname.match(/^\/([A-Za-z0-9_]+)\/status\/([0-9]+)(?:\/(?:photo|video)\/[1-9][0-9]*)?\/?$/);
+      // X rewrites /i/status/:id to the author path. Compare the complete ID
+      // without replacing the navigation URL retained for the current task.
+      return match ? `https://x.com/${identityOnly ? "i" : match[1]}/status/${match[2]}` : "";
+    } catch (_) {
+      return "";
+    }
   }
 
   function normalize(text) {
@@ -1821,8 +1830,8 @@
     if (globalThis[SINGLETON_KEY]?.instanceId !== INSTANCE_ID || !globalThis[SINGLETON_KEY]?.active) {
       throw new Error("X 页面脚本已失效或被替换");
     }
-    const currentTarget = normalizeTweetUrl(location.href);
-    if (activeTargetUrl && currentTarget !== activeTargetUrl && !isExpectedReplyComposeTransition()) {
+    const currentTarget = normalizeTweetUrl(location.href, true);
+    if (activeTargetUrl && currentTarget !== normalizeTweetUrl(activeTargetUrl, true) && !isExpectedReplyComposeTransition()) {
       throw new Error("目标推文已变化，取消本单操作");
     }
     if (!runId || cancelledRunIds.has(runId) || activeRunId !== runId) {

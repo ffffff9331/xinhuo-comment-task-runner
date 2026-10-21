@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "薪火自动接单助手 v0.1.50",
+  "name": "薪火自动接单助手 v0.1.51",
   "description": "自动接取薪火评论任务并完成 X 回复与核验。",
-  "version": "0.1.50",
+  "version": "0.1.51",
   "icons": {
     "16": "src/assets/icons/icon16.png",
     "32": "src/assets/icons/icon32.png",
@@ -10,7 +10,7 @@
     "128": "src/assets/icons/icon128.png"
   },
   "action": {
-    "default_title": "薪火自动接单助手 v0.1.50",
+    "default_title": "薪火自动接单助手 v0.1.51",
     "default_icon": {
       "16": "src/assets/icons/icon16.png",
       "32": "src/assets/icons/icon32.png",

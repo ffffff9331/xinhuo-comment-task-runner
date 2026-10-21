@@ -1,6 +1,6 @@
 (function () {
   const SINGLETON_KEY = "__xinhuoTaskRunnerSingleton__";
-  const SCRIPT_VERSION = "0.1.50";
+  const SCRIPT_VERSION = "0.1.51";
   const contextRuntime = chrome.runtime;
   const previous = globalThis[SINGLETON_KEY];
   if (previous?.version === SCRIPT_VERSION && previous.isAlive?.()) return;
